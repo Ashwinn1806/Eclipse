@@ -1,0 +1,112 @@
+// Prisma schema for Eclipse Gym & Nutrition Tracker
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// User Goals table: Active macro targets and weight goals
+model UserGoal {
+  id                 String    @id @default(cuid())
+  userId             String    @map("user_id")
+  goalType           String    @map("goal_type") // "Bulk" | "Cut"
+  startWeight        Float     @map("start_weight")
+  targetWeight       Float     @map("target_weight")
+  targetDate         DateTime  @map("target_date")
+  targetDailyCals    Int       @map("target_daily_cals")
+  targetDailyProtein Int       @map("target_daily_protein")
+  isActive           Boolean   @default(true) @map("is_active")
+  createdAt          DateTime  @default(now()) @map("created_at")
+  updatedAt          DateTime  @updatedAt @map("updated_at")
+
+  @@index([userId])
+  @@map("user_goals")
+}
+
+// Nutrition Entries table: Individual food, snack, or water items logged
+model NutritionEntry {
+  id          String   @id @default(cuid())
+  userId      String   @map("user_id")
+  date        String   @map("date") // Format: "YYYY-MM-DD"
+  itemName    String   @map("item_name")
+  category    String   @map("category") // "Meal" | "Snack" | "Water"
+  calories    Int      @map("calories")
+  proteinG    Float    @map("protein_g")
+  isCompleted Boolean  @default(false) @map("is_completed")
+  createdAt   DateTime @default(now()) @map("created_at")
+
+  @@index([userId, date])
+  @@map("nutrition_entries")
+}
+
+// Daily Logs table: Aggregates and morning weigh-in
+model DailyLog {
+  id             String   @id @default(cuid())
+  userId         String   @map("user_id")
+  date           String   @map("date") // Format: "YYYY-MM-DD"
+  morningWeight  Float?   @map("morning_weight")
+  totalCalories  Int      @default(0) @map("total_calories")
+  totalProtein   Float    @default(0) @map("total_protein")
+  createdAt      DateTime @default(now()) @map("created_at")
+  updatedAt      DateTime @updatedAt @map("updated_at")
+
+  @@unique([userId, date])
+  @@index([userId])
+  @@map("daily_logs")
+}
+
+// Weekly Snapshots table: AI Macro Check-In decision audit trail
+model WeeklySnapshot {
+  id             String   @id @default(cuid())
+  userId         String   @map("user_id")
+  weekStartDate  DateTime @map("week_start_date")
+  avgWeight      Float    @map("avg_weight")
+  weightDelta    Float    @map("weight_delta")
+  aiDecision     String   @map("ai_decision") @db.Text
+  calsAdjustedBy Int      @map("cals_adjusted_by")
+  createdAt      DateTime @default(now()) @map("created_at")
+
+  @@index([userId])
+  @@map("weekly_snapshots")
+}
+
+// Workout Sessions table: A recorded training session
+model WorkoutSession {
+  id           String       @id @default(cuid())
+  userId       String       @map("user_id")
+  date         DateTime     @default(now()) @map("date")
+  splitDayName String       @map("split_day_name") // e.g. "Push Day A", "Pull Day", "Legs"
+  totalTonnage Float        @default(0) @map("total_tonnage")
+  isCompleted  Boolean      @default(false) @map("is_completed")
+  createdAt    DateTime     @default(now()) @map("created_at")
+  updatedAt    DateTime     @updatedAt @map("updated_at")
+
+  sets         WorkoutSet[]
+
+  @@index([userId])
+  @@map("workout_sessions")
+}
+
+// Workout Sets table: Hierarchical set information under a session
+model WorkoutSet {
+  id           String         @id @default(cuid())
+  sessionId    String         @map("session_id")
+  exerciseName String         @map("exercise_name")
+  setNumber    Int            @map("set_number")
+  targetWeight Float          @map("target_weight")
+  targetReps   Int            @map("target_reps")
+  actualWeight Float?         @map("actual_weight")
+  actualReps   Int?           @map("actual_reps")
+  isCompleted  Boolean        @default(false) @map("is_completed")
+  createdAt    DateTime       @default(now()) @map("created_at")
+
+  session      WorkoutSession @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+
+  @@index([sessionId])
+  @@index([exerciseName])
+  @@map("workout_sets")
+}
