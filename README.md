@@ -1,6 +1,6 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# Eclipse - Gym & Nutrition Tracker
 
-## Getting Started
+Mobile-first intelligent gym workout tracker, Notion-style nutrition log, and AI macro check-in engine. Built with Next.js 16, React 19, Tailwind CSS v4, and Prisma.
 
 First, run the development server:
 
