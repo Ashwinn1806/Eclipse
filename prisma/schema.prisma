@@ -9,11 +9,84 @@ datasource db {
   url      = env("DATABASE_URL")
 }
 
+// NextAuth User Model
+model User {
+  id            String          @id @default(cuid())
+  name          String?
+  email         String?         @unique
+  emailVerified DateTime?       @map("email_verified")
+  image         String?
+  accounts      Account[]
+  sessions      Session[]
+
+  // Eclipse Relations
+  goals         UserGoal[]
+  nutrition     NutritionEntry[]
+  dailyLogs     DailyLog[]
+  weeklySnapshots WeeklySnapshot[]
+  workouts      WorkoutSession[]
+
+  createdAt     DateTime        @default(now()) @map("created_at")
+  updatedAt     DateTime        @updatedAt @map("updated_at")
+
+  @@map("users")
+}
+
+// NextAuth Account Model
+model Account {
+  id                String   @id @default(cuid())
+  userId            String   @map("user_id")
+  type              String
+  provider          String
+  providerAccountId String   @map("provider_account_id")
+  refresh_token     String?  @db.Text
+  access_token      String?  @db.Text
+  expires_at        Int?
+  token_type        String?
+  scope             String?
+  id_token          String?  @db.Text
+  session_state     String?
+
+  createdAt         DateTime @default(now()) @map("created_at")
+  updatedAt         DateTime @updatedAt @map("updated_at")
+
+  user              User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([provider, providerAccountId])
+  @@index([userId])
+  @@map("accounts")
+}
+
+// NextAuth Session Model
+model Session {
+  id           String   @id @default(cuid())
+  sessionToken String   @unique @map("session_token")
+  userId       String   @map("user_id")
+  expires      DateTime
+  user         User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  createdAt    DateTime @default(now()) @map("created_at")
+  updatedAt    DateTime @updatedAt @map("updated_at")
+
+  @@index([userId])
+  @@map("sessions")
+}
+
+// NextAuth VerificationToken Model
+model VerificationToken {
+  identifier String
+  token      String
+  expires    DateTime
+
+  @@unique([identifier, token])
+  @@map("verification_tokens")
+}
+
 // User Goals table: Active macro targets and weight goals
 model UserGoal {
   id                 String    @id @default(cuid())
   userId             String    @map("user_id")
-  goalType           String    @map("goal_type") // "Bulk" | "Cut"
+  goalType           String    @map("goal_type") // "Bulk" | "Cut" | "Maintain"
   startWeight        Float     @map("start_weight")
   targetWeight       Float     @map("target_weight")
   targetDate         DateTime  @map("target_date")
@@ -22,6 +95,8 @@ model UserGoal {
   isActive           Boolean   @default(true) @map("is_active")
   createdAt          DateTime  @default(now()) @map("created_at")
   updatedAt          DateTime  @updatedAt @map("updated_at")
+
+  user               User      @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   @@index([userId])
   @@map("user_goals")
@@ -39,6 +114,8 @@ model NutritionEntry {
   isCompleted Boolean  @default(false) @map("is_completed")
   createdAt   DateTime @default(now()) @map("created_at")
 
+  user        User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
   @@index([userId, date])
   @@map("nutrition_entries")
 }
@@ -53,6 +130,8 @@ model DailyLog {
   totalProtein   Float    @default(0) @map("total_protein")
   createdAt      DateTime @default(now()) @map("created_at")
   updatedAt      DateTime @updatedAt @map("updated_at")
+
+  user           User     @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   @@unique([userId, date])
   @@index([userId])
@@ -70,6 +149,8 @@ model WeeklySnapshot {
   calsAdjustedBy Int      @map("cals_adjusted_by")
   createdAt      DateTime @default(now()) @map("created_at")
 
+  user           User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
   @@index([userId])
   @@map("weekly_snapshots")
 }
@@ -85,6 +166,7 @@ model WorkoutSession {
   createdAt    DateTime     @default(now()) @map("created_at")
   updatedAt    DateTime     @updatedAt @map("updated_at")
 
+  user         User         @relation(fields: [userId], references: [id], onDelete: Cascade)
   sets         WorkoutSet[]
 
   @@index([userId])

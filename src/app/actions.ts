@@ -1,14 +1,21 @@
-'use server';
+﻿'use server';
+import { auth } from '@/auth';
 import { prisma } from '@/lib/prisma';
 
-// Temporary dummy user ID for local PWA usage
-const USER_ID = 'local-user-001';
+async function getSessionUserId(): Promise<string> {
+  const session = await auth();
+  if (!session?.user?.id) {
+    throw new Error('Unauthorized');
+  }
+  return session.user.id;
+}
 
 export async function getTodayNutrition() {
+  const userId = await getSessionUserId();
   const today = new Date().toISOString().split('T')[0];
   try {
     const entries = await prisma.nutritionEntry.findMany({
-      where: { userId: USER_ID, date: today },
+      where: { userId, date: today },
       orderBy: { createdAt: 'desc' }
     });
     return entries;
@@ -19,21 +26,22 @@ export async function getTodayNutrition() {
 }
 
 export async function addNutritionEntry(data: { itemName: string; category: string; calories: number; proteinG: number }) {
+  const userId = await getSessionUserId();
   const today = new Date().toISOString().split('T')[0];
   try {
     return await prisma.nutritionEntry.create({
       data: {
         ...data,
-        userId: USER_ID,
+        userId,
         date: today,
-        isCompleted: true // Default to completed when quick-adding
+        isCompleted: true
       }
     });
   } catch (error) {
     console.warn("DB offline or unreachable, falling back to local store:", error);
     return {
       id: `local-${Date.now()}`,
-      userId: USER_ID,
+      userId,
       date: today,
       itemName: data.itemName,
       category: data.category,
@@ -46,6 +54,8 @@ export async function addNutritionEntry(data: { itemName: string; category: stri
 }
 
 export async function toggleNutritionItem(id: string, isCompleted: boolean) {
+  // Auth guard — ensure session is valid before any DB write
+  await getSessionUserId();
   try {
     return await prisma.nutritionEntry.update({
       where: { id },
@@ -58,17 +68,17 @@ export async function toggleNutritionItem(id: string, isCompleted: boolean) {
 }
 
 export async function logWorkoutSet(exerciseName: string, actualWeight: number, actualReps: number) {
+  const userId = await getSessionUserId();
   try {
-    // Find or create an active workout session for today
     let session = await prisma.workoutSession.findFirst({
-      where: { userId: USER_ID, isCompleted: false },
+      where: { userId, isCompleted: false },
       orderBy: { createdAt: 'desc' }
     });
 
     if (!session) {
       session = await prisma.workoutSession.create({
         data: {
-          userId: USER_ID,
+          userId,
           splitDayName: 'Push Day A',
           totalTonnage: actualWeight * actualReps,
         }
@@ -110,12 +120,13 @@ export async function logWorkoutSet(exerciseName: string, actualWeight: number, 
 }
 
 export async function getPreviousExerciseData(exerciseName: string) {
+  const userId = await getSessionUserId();
   try {
     const previousSet = await prisma.workoutSet.findFirst({
       where: {
         exerciseName,
         isCompleted: true,
-        session: { userId: USER_ID },
+        session: { userId },
       },
       orderBy: { createdAt: 'desc' },
       select: {
@@ -131,20 +142,17 @@ export async function getPreviousExerciseData(exerciseName: string) {
       };
     }
 
-    return {
-      actualWeight: 32,
-      actualReps: 10,
-    };
+    return { actualWeight: 32, actualReps: 10 };
   } catch (error) {
     console.warn("DB offline or unreachable, falling back to default ghost benchmark:", error);
-    return {
-      actualWeight: 32,
-      actualReps: 10,
-    };
+    return { actualWeight: 32, actualReps: 10 };
   }
 }
 
 export async function mockOrRunAICheckIn() {
+  // Auth guard
+  await getSessionUserId();
+
   if (!process.env.GEMINI_API_KEY) {
     return {
       calsAdjustedBy: 150,
@@ -166,13 +174,24 @@ Evaluate metabolic adaptation. A standard bulk targets +0.25kg/wk. A cut targets
 Return ONLY valid JSON with no markdown formatting:
 { "calsAdjustedBy": number, "explanation": "string", "newDailyCals": number, "newDailyProtein": number }`;
 
-    const response = await ai.models.generateContent({
-      model: "gemini-2.5-flash",
-      contents: prompt,
-      config: { responseMimeType: "application/json" }
-    });
+    const candidateModels = ['gemini-2.5-flash', 'gemini-3.5-flash-lite', 'gemini-flash-latest', 'gemini-3.8-flash'];
+    let rawText = '';
 
-    const clean = (response.text || "").replace(/```json/g, "").replace(/```/g, "").trim();
+    for (const model of candidateModels) {
+      try {
+        const response = await ai.models.generateContent({
+          model,
+          contents: prompt,
+          config: { responseMimeType: "application/json" }
+        });
+        rawText = response.text || '';
+        if (rawText) break;
+      } catch (mErr) {
+        continue;
+      }
+    }
+
+    const clean = (rawText || "").replace(/```json/g, "").replace(/```/g, "").trim();
     return JSON.parse(clean);
   } catch (error) {
     console.warn("AI generation failed, returning fallback:", error);
