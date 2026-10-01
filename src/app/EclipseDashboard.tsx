@@ -16,9 +16,11 @@ import {
   Timer, 
   FastForward, 
   Ghost,
-  LogOut
+  LogOut,
+  Home
 } from 'lucide-react';
 import confetti from 'canvas-confetti';
+import { toast } from 'sonner';
 import { 
   addNutritionEntry, 
   toggleNutritionItem, 
@@ -82,7 +84,18 @@ const ProgressRing = ({ progress, label, value, colorClass }: ProgressRingProps)
 
 export default function EclipseDashboard({ user }: { user: UserInfo }) {
   const [showUserMenu, setShowUserMenu] = useState(false);
-  const [activeTab, setActiveTab] = useState<'workout' | 'nutrition' | 'ai'>('workout');
+  const [activeTab, setActiveTab] = useState<'dashboard' | 'workout' | 'nutrition' | 'ai'>('dashboard');
+
+  // Check URL query parameters for active tab
+  useEffect(() => {
+    if (typeof window !== 'undefined') {
+      const params = new URLSearchParams(window.location.search);
+      const tabParam = params.get('tab');
+      if (tabParam === 'nutrition' || tabParam === 'ai' || tabParam === 'dashboard' || tabParam === 'workout') {
+        setActiveTab(tabParam as any);
+      }
+    }
+  }, []);
   const [tonnage, setTonnage] = useState(0);
   const [actualReps, setActualReps] = useState<number | ''>(10);
   const [setLogged, setSetLogged] = useState(false);
@@ -275,9 +288,18 @@ export default function EclipseDashboard({ user }: { user: UserInfo }) {
         if (result) {
           setAiResult(result);
           setAiApplied(false);
+          // Detect if this was a mock/fallback response
+          if (result.explanation?.startsWith('[MOCK]') || result.explanation?.startsWith('[FALLBACK]')) {
+            toast.warning('AI check-in unavailable', {
+              description: 'Gemini API key not configured. Using rule-based fallback targets.',
+            });
+          }
         }
       } catch (err) {
         console.error("AI Check-In failed:", err);
+        toast.error('AI check-in failed', {
+          description: 'Could not reach the AI engine. Check your connection and try again.',
+        });
       }
     });
   };
@@ -373,39 +395,71 @@ export default function EclipseDashboard({ user }: { user: UserInfo }) {
 
       {/* Main Container */}
       <main className="p-4 max-w-lg mx-auto space-y-6">
-        {/* Workout Tab */}
-        {activeTab === 'workout' && (
-          <div className="space-y-4 animate-in fade-in slide-in-from-bottom-3 duration-300">
-            {/* Split Switcher Pills */}
-            <div className="flex items-center justify-between gap-2 overflow-x-auto no-scrollbar pb-1">
-              <div className="flex items-center gap-1.5 shrink-0">
+        {/* Dashboard Overview Tab */}
+        {(activeTab === 'dashboard' || activeTab === 'workout') && (
+          <div className="space-y-6 animate-in fade-in slide-in-from-bottom-3 duration-300">
+            {/* Quick Macro & Energy Progress Rings */}
+            <div className="flex gap-4 justify-around p-6 bg-slate-900/40 backdrop-blur-md rounded-3xl border border-white/5 shadow-2xl">
+              <ProgressRing 
+                progress={calorieProgress} 
+                label="Calories" 
+                value={`${totalCalories.toLocaleString()}`} 
+                colorClass="stroke-cyan-400" 
+              />
+              <ProgressRing 
+                progress={proteinProgress} 
+                label="Protein" 
+                value={`${totalProtein}g`} 
+                colorClass="stroke-amber-400" 
+              />
+            </div>
+
+            {/* Direct Workout Hub Launcher Card */}
+            <div className="relative overflow-hidden bg-gradient-to-br from-slate-900 via-slate-900/90 to-cyan-950/40 p-6 rounded-3xl border border-cyan-500/30 shadow-[0_0_30px_rgba(6,182,212,0.15)] space-y-4">
+              <div className="flex justify-between items-start">
+                <div>
+                  <span className="text-cyan-400 text-[11px] font-black uppercase tracking-wider flex items-center gap-1.5 mb-1">
+                    <span className="w-2 h-2 rounded-full bg-cyan-400 animate-ping" />
+                    Today's Training Split
+                  </span>
+                  <h2 className="text-2xl font-black text-white tracking-tight">Push Day A</h2>
+                  <p className="text-xs text-slate-400 mt-0.5 font-medium">Chest · Heavy Shoulders · Triceps</p>
+                </div>
+                <div className="w-12 h-12 rounded-2xl bg-cyan-500/10 border border-cyan-500/30 flex items-center justify-center text-cyan-400">
+                  <Dumbbell size={24} />
+                </div>
+              </div>
+
+              {/* Split Quick Jump Chips */}
+              <div className="flex items-center gap-2 pt-1 overflow-x-auto no-scrollbar">
                 <Link
                   href="/workout/push"
-                  className="px-3.5 py-1.5 rounded-full text-xs font-bold bg-cyan-500/20 text-cyan-300 border border-cyan-500/40 shadow-[0_0_12px_rgba(6,182,212,0.25)] flex items-center gap-1.5"
+                  className="px-3 py-1.5 rounded-xl text-xs font-bold bg-cyan-500/20 text-cyan-300 border border-cyan-500/40 flex items-center gap-1.5 shrink-0"
                 >
                   <span className="w-1.5 h-1.5 rounded-full bg-cyan-400" />
-                  Push
+                  Push Hub
                 </Link>
                 <Link
                   href="/workout/pull"
-                  className="px-3.5 py-1.5 rounded-full text-xs font-bold bg-slate-900/80 text-slate-400 border border-white/5 hover:border-slate-700 hover:text-white transition-colors"
+                  className="px-3 py-1.5 rounded-xl text-xs font-bold bg-slate-950/60 text-slate-300 border border-white/5 hover:border-slate-700 shrink-0"
                 >
-                  Pull
+                  Pull Hub
                 </Link>
                 <Link
                   href="/workout/legs"
-                  className="px-3.5 py-1.5 rounded-full text-xs font-bold bg-slate-900/80 text-slate-400 border border-white/5 hover:border-slate-700 hover:text-white transition-colors"
+                  className="px-3 py-1.5 rounded-xl text-xs font-bold bg-slate-950/60 text-slate-300 border border-white/5 hover:border-slate-700 shrink-0"
                 >
-                  Legs
+                  Legs Hub
                 </Link>
               </div>
 
+              {/* Direct Full Hub Action CTA */}
               <Link
                 href="/workout/push"
-                className="text-xs font-bold text-cyan-400 hover:text-cyan-300 shrink-0 flex items-center gap-1 px-2.5 py-1 rounded-xl bg-cyan-500/10 border border-cyan-500/20"
+                className="w-full py-4 rounded-2xl bg-gradient-to-r from-cyan-500 via-teal-400 to-emerald-400 text-slate-950 font-black text-sm uppercase tracking-wider flex items-center justify-center gap-2 shadow-[0_0_20px_rgba(6,182,212,0.3)] hover:opacity-95 active:scale-[0.99] transition-all"
               >
-                <span>Full Hub</span>
-                <span>→</span>
+                <span>Launch Full Workout Hub</span>
+                <span className="text-base">→</span>
               </Link>
             </div>
 
@@ -755,14 +809,21 @@ export default function EclipseDashboard({ user }: { user: UserInfo }) {
       )}
 
       {/* Bottom Navigation */}
-      <nav className="fixed bottom-0 left-0 right-0 max-w-lg mx-auto bg-[#020617]/90 backdrop-blur-xl border-t border-white/5 px-8 py-3.5 pb-[max(1rem,env(safe-area-inset-bottom))] flex justify-between items-center z-40">
+      <nav className="fixed bottom-0 left-0 right-0 max-w-lg mx-auto bg-[#020617]/95 backdrop-blur-xl border-t border-white/5 px-6 py-3 pb-[max(1rem,env(safe-area-inset-bottom))] flex justify-around items-center z-40">
         <button 
-          onClick={() => setActiveTab('workout')} 
-          className={`flex flex-col items-center gap-1 transition-all ${activeTab === 'workout' ? 'text-cyan-400 scale-105' : 'text-slate-500 hover:text-slate-300'}`}
+          onClick={() => setActiveTab('dashboard')} 
+          className={`flex flex-col items-center gap-1 transition-all ${activeTab === 'dashboard' || activeTab === 'workout' ? 'text-cyan-400 scale-105' : 'text-slate-500 hover:text-slate-300'}`}
         >
-          <Dumbbell size={22} className={activeTab === 'workout' ? 'stroke-[2.5]' : 'stroke-2'} />
-          <span className="text-[10px] font-bold tracking-wider">TRACK</span>
+          <Home size={22} className={activeTab === 'dashboard' || activeTab === 'workout' ? 'stroke-[2.5]' : 'stroke-2'} />
+          <span className="text-[10px] font-bold tracking-wider">DASHBOARD</span>
         </button>
+        <Link 
+          href="/workout/push" 
+          className="flex flex-col items-center gap-1 text-slate-500 hover:text-cyan-400 transition-all group"
+        >
+          <Dumbbell size={22} className="stroke-2 group-hover:scale-105 transition-all" />
+          <span className="text-[10px] font-bold tracking-wider">FULL HUB</span>
+        </Link>
         <button 
           onClick={() => setActiveTab('nutrition')} 
           className={`flex flex-col items-center gap-1 transition-all ${activeTab === 'nutrition' ? 'text-amber-400 scale-105' : 'text-slate-500 hover:text-slate-300'}`}

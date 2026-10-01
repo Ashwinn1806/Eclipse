@@ -207,6 +207,38 @@ export default function WorkoutLayout({
         <main className="flex-1 w-full max-w-4xl mx-auto p-4 sm:p-6 lg:p-8 pb-32">
           {children}
         </main>
+
+        {/* Mobile Bottom Navigation */}
+        <nav className="md:hidden fixed bottom-0 left-0 right-0 max-w-lg mx-auto bg-[#020617]/95 backdrop-blur-xl border-t border-white/5 px-6 py-3 pb-[max(1rem,env(safe-area-inset-bottom))] flex justify-around items-center z-40">
+          <Link
+            href="/"
+            className="flex flex-col items-center gap-1 text-slate-500 hover:text-slate-200 transition-all group"
+          >
+            <Home size={22} className="stroke-2 group-hover:scale-105 transition-all" />
+            <span className="text-[10px] font-bold tracking-wider">DASHBOARD</span>
+          </Link>
+          <Link
+            href="/workout/push"
+            className="flex flex-col items-center gap-1 text-cyan-400 scale-105 transition-all"
+          >
+            <Dumbbell size={22} className="stroke-[2.5]" />
+            <span className="text-[10px] font-bold tracking-wider">FULL HUB</span>
+          </Link>
+          <Link
+            href="/?tab=nutrition"
+            className="flex flex-col items-center gap-1 text-slate-500 hover:text-amber-400 transition-all group"
+          >
+            <Utensils size={22} className="stroke-2 group-hover:scale-105 transition-all" />
+            <span className="text-[10px] font-bold tracking-wider">MACROS</span>
+          </Link>
+          <Link
+            href="/?tab=ai"
+            className="flex flex-col items-center gap-1 text-slate-500 hover:text-purple-400 transition-all group"
+          >
+            <Sparkles size={22} className="stroke-2 group-hover:scale-105 transition-all" />
+            <span className="text-[10px] font-bold tracking-wider">ENGINE</span>
+          </Link>
+        </nav>
       </div>
     </div>
   );

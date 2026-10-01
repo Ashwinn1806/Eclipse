@@ -79,9 +79,9 @@ export async function analyzeSessionProgression(
     deltaReps: s.actualReps - s.targetReps,
   }));
 
-  const promptDirective = `Act as a strength coach. Analyze these sets. If the user met or exceeded target reps, prescribe a 2.5kg to 5kg weight increase for their next session. If they missed reps, maintain weight and adjust rep targets. Return JSON exactly matching this schema: [{ "exercise": string, "nextWeight": number, "nextReps": number, "reason": string }].
+  const systemInstruction = `You are an elite strength coach. Analyze completed workout sets and prescribe progressive overload weights and reps for the next session. If the user met or exceeded target reps, prescribe a 2.5kg to 5kg weight increase for their next session. If they missed reps, maintain weight and adjust rep targets.`;
 
-Completed Session Data:
+  const promptDirective = `Completed Session Data:
 ${JSON.stringify(setsDescription, null, 2)}`;
 
   if (process.env.GEMINI_API_KEY && process.env.GEMINI_API_KEY.trim() !== '') {
@@ -89,7 +89,7 @@ ${JSON.stringify(setsDescription, null, 2)}`;
       // Initialize client exclusively on the server using environment variable
       const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
 
-      const candidateModels = ['gemini-2.5-flash', 'gemini-3.5-flash-lite', 'gemini-flash-latest', 'gemini-3.8-flash'];
+      const candidateModels = ['gemini-2.5-flash', 'gemini-2.0-flash'];
       let rawText = '';
 
       for (const modelName of candidateModels) {
@@ -98,8 +98,9 @@ ${JSON.stringify(setsDescription, null, 2)}`;
             model: modelName,
             contents: promptDirective,
             config: {
+              systemInstruction,
               responseMimeType: 'application/json',
-              responseJsonSchema: {
+              responseSchema: {
                 type: Type.ARRAY,
                 items: {
                   type: Type.OBJECT,
@@ -122,19 +123,20 @@ ${JSON.stringify(setsDescription, null, 2)}`;
         }
       }
 
-      const cleanJson = rawText.replace(/```json/g, '').replace(/```/g, '').trim();
-      const parsed = JSON.parse(cleanJson);
+      if (rawText) {
+        const parsed = JSON.parse(rawText.trim());
 
-      if (Array.isArray(parsed) && parsed.length > 0) {
-        recommendations = parsed.map((item: any) => ({
-          exercise: String(item.exercise || 'Exercise'),
-          nextWeight: Number(item.nextWeight || 0),
-          nextReps: Number(item.nextReps || 10),
-          reason: String(item.reason || 'AI progression target applied.'),
-        }));
+        if (Array.isArray(parsed) && parsed.length > 0) {
+          recommendations = parsed.map((item: any) => ({
+            exercise: String(item.exercise || 'Exercise'),
+            nextWeight: Number(item.nextWeight || 0),
+            nextReps: Number(item.nextReps || 10),
+            reason: String(item.reason || 'AI progression target applied.'),
+          }));
+        }
       }
     } catch (aiError) {
-      console.warn('Gemini 2.5 Flash analysis error, switching to algorithmic progression:', aiError);
+      console.warn('Gemini Flash analysis error, switching to algorithmic progression:', aiError);
       source = 'fallback';
     }
   } else {

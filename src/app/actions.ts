@@ -1,6 +1,45 @@
-﻿'use server';
+'use server';
 import { auth } from '@/auth';
 import { prisma } from '@/lib/prisma';
+import { MACRO_CHECKIN_PERSONA } from '@/lib/aiPersonas';
+
+// ---------------------------------------------------------------------------
+// Verified active Gemini model chain (ordered by capability)
+// ---------------------------------------------------------------------------
+const GEMINI_CANDIDATE_MODELS = ['gemini-2.5-flash', 'gemini-2.0-flash', 'gemini-2.0-flash-lite'];
+
+// ---------------------------------------------------------------------------
+// Module-level helper: single Gemini call with exponential backoff retry.
+// Extracted to module scope to avoid re-allocation on every call.
+// ---------------------------------------------------------------------------
+async function callWithBackoff(
+  ai: any,
+  model: string,
+  contents: string,
+  config: object,
+  retries = 1,
+  delayMs = 500,
+): Promise<{ text: string; inputTokens: number; outputTokens: number }> {
+  try {
+    const response = await ai.models.generateContent({ model, contents, config });
+    return {
+      text: response.text || '',
+      inputTokens: response.usageMetadata?.promptTokenCount ?? 0,
+      outputTokens: response.usageMetadata?.candidatesTokenCount ?? 0,
+    };
+  } catch (err: any) {
+    const isTransient =
+      err?.status === 503 ||
+      err?.status === 429 ||
+      /overloaded|rate.?limit|unavailable/i.test(err?.message || '');
+
+    if (isTransient && retries > 0) {
+      await new Promise((res) => setTimeout(res, delayMs));
+      return callWithBackoff(ai, model, contents, config, retries - 1, delayMs * 2);
+    }
+    throw err;
+  }
+}
 
 async function getSessionUserId(): Promise<string> {
   const session = await auth();
@@ -150,56 +189,153 @@ export async function getPreviousExerciseData(exerciseName: string) {
 }
 
 export async function mockOrRunAICheckIn() {
-  // Auth guard
-  await getSessionUserId();
+  const userId = await getSessionUserId();
+
+  // --- 1. Fetch real user profile from DB ---
+  let goalType = 'Bulk';
+  let targetCals = 3100;
+  let targetProtein = 160;
+  let weeklyAvgWeight = 78.2;
+  let weightDelta = '+0.05';
+  let sevenDaysAgo = new Date();
+  sevenDaysAgo.setDate(sevenDaysAgo.getDate() - 7);
+
+  try {
+    const activeGoal = await prisma.userGoal.findFirst({
+      where: { userId, isActive: true },
+      orderBy: { createdAt: 'desc' },
+    });
+    if (activeGoal) {
+      goalType = activeGoal.goalType;
+      targetCals = activeGoal.targetDailyCals;
+      targetProtein = activeGoal.targetDailyProtein;
+    }
+
+    const recentLogs = await prisma.dailyLog.findMany({
+      where: {
+        userId,
+        morningWeight: { not: null },
+        date: { gte: sevenDaysAgo.toISOString().split('T')[0] },
+      },
+      orderBy: { date: 'asc' },
+    });
+
+    if (recentLogs.length >= 2) {
+      const weights = recentLogs
+        .map((l) => l.morningWeight)
+        .filter((w): w is number => w !== null);
+      const avg = weights.reduce((s, w) => s + w, 0) / weights.length;
+      weeklyAvgWeight = Math.round(avg * 10) / 10;
+      const delta = weights[weights.length - 1] - weights[0];
+      weightDelta = `${delta >= 0 ? '+' : ''}${delta.toFixed(2)}`;
+    }
+  } catch (err) {
+    console.warn('Failed to load user profile for AI check-in, using defaults:', err);
+  }
+
+  const fallbackResult = {
+    calsAdjustedBy: 150,
+    newDailyCals: targetCals + 150,
+    newDailyProtein: targetProtein,
+    explanation: '[FALLBACK] Weight trend steady. Suggested +150 calorie surplus adjustment to sustain progressive overload.',
+  };
 
   if (!process.env.GEMINI_API_KEY) {
     return {
-      calsAdjustedBy: 150,
-      newDailyCals: 3100,
-      newDailyProtein: 160,
-      explanation: "[MOCK] Weight trend has stalled at 0.05kg/wk. Adding 150 calories to break the plateau."
+      ...fallbackResult,
+      explanation: `[MOCK] Weight trend stalled at ${weightDelta}kg/wk for ${goalType} goal. Adding 150 calories to break the plateau.`,
     };
   }
 
   try {
-    const { GoogleGenAI } = await import("@google/genai");
+    const { GoogleGenAI, Type } = await import('@google/genai');
     const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
-    const prompt = `You are the Eclipse AI Macro Check-In Engine.
-Goal: Bulk
-7-Day Weight Avg: 78.2kg (Delta: +0.05kg)
-Current Target: 2950 kcal, 160g protein.
 
-Evaluate metabolic adaptation. A standard bulk targets +0.25kg/wk. A cut targets -0.5kg/wk. If progress has stalled, suggest an adjustment (e.g., +/- 150 cals). If on track, maintain targets.
-Return ONLY valid JSON with no markdown formatting:
-{ "calsAdjustedBy": number, "explanation": "string", "newDailyCals": number, "newDailyProtein": number }`;
+    const prompt = `Goal: ${goalType}
+7-Day Weight Avg: ${weeklyAvgWeight}kg (Delta: ${weightDelta}kg)
+Current Target: ${targetCals} kcal, ${targetProtein}g protein.`;
 
-    const candidateModels = ['gemini-2.5-flash', 'gemini-3.5-flash-lite', 'gemini-flash-latest', 'gemini-3.8-flash'];
+    const config = {
+      systemInstruction: MACRO_CHECKIN_PERSONA,
+      responseMimeType: 'application/json',
+      responseSchema: {
+        type: Type.OBJECT,
+        properties: {
+          calsAdjustedBy: { type: Type.NUMBER },
+          explanation: { type: Type.STRING },
+          newDailyCals: { type: Type.NUMBER },
+          newDailyProtein: { type: Type.NUMBER },
+        },
+        required: ['calsAdjustedBy', 'explanation', 'newDailyCals', 'newDailyProtein'],
+      },
+    };
+
     let rawText = '';
+    let usedModel = '';
 
-    for (const model of candidateModels) {
+    // --- 2. Try each model with backoff; module-level callWithBackoff avoids re-allocation ---
+    for (const model of GEMINI_CANDIDATE_MODELS) {
       try {
-        const response = await ai.models.generateContent({
-          model,
-          contents: prompt,
-          config: { responseMimeType: "application/json" }
-        });
-        rawText = response.text || '';
-        if (rawText) break;
-      } catch (mErr) {
+        // AbortController 10s hard timeout so Next.js never hangs indefinitely
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), 10_000);
+        let result: { text: string; inputTokens: number; outputTokens: number };
+        try {
+          result = await callWithBackoff(ai, model, prompt, config);
+        } finally {
+          clearTimeout(timeoutId);
+        }
+        if (result.text) {
+          rawText = result.text;
+          usedModel = model;
+          // 7. Token usage logging
+          console.info('[Gemini] macro-checkin token usage:', {
+            model,
+            inputTokens: result.inputTokens,
+            outputTokens: result.outputTokens,
+          });
+          break;
+        }
+      } catch (mErr: any) {
+        console.warn(`[Gemini] model ${model} failed:`, mErr?.message || mErr);
         continue;
       }
     }
 
-    const clean = (rawText || "").replace(/```json/g, "").replace(/```/g, "").trim();
-    return JSON.parse(clean);
+    if (rawText) {
+      // --- 3. Safe JSON.parse — treat parse failure as a fallback trigger ---
+      let parsed: typeof fallbackResult;
+      try {
+        parsed = JSON.parse(rawText.trim());
+      } catch (parseErr) {
+        console.warn('[Gemini] JSON parse failed despite responseSchema, using fallback:', parseErr);
+        return fallbackResult;
+      }
+
+      // --- 4. Persist AI decision to WeeklySnapshot audit trail ---
+      try {
+        await prisma.weeklySnapshot.create({
+          data: {
+            userId,
+            weekStartDate: sevenDaysAgo,
+            avgWeight: weeklyAvgWeight,
+            weightDelta: parseFloat(weightDelta),
+            aiDecision: parsed.explanation,
+            calsAdjustedBy: parsed.calsAdjustedBy,
+          },
+        });
+        console.info('[Eclipse] WeeklySnapshot saved for user', userId);
+      } catch (dbErr) {
+        console.warn('[Eclipse] WeeklySnapshot write failed (non-fatal):', dbErr);
+      }
+
+      return parsed;
+    }
+
+    return fallbackResult;
   } catch (error) {
-    console.warn("AI generation failed, returning fallback:", error);
-    return {
-      calsAdjustedBy: 150,
-      newDailyCals: 3100,
-      newDailyProtein: 160,
-      explanation: "[FALLBACK] Weight trend steady. Suggested +150 calorie surplus adjustment to sustain progressive overload."
-    };
+    console.warn('AI generation failed, returning fallback:', error);
+    return fallbackResult;
   }
 }
+

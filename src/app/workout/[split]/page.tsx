@@ -21,6 +21,7 @@ import {
   X
 } from 'lucide-react';
 import confetti from 'canvas-confetti';
+import { toast } from 'sonner';
 import { 
   USER_SPLITS, 
   getSplitBySlug, 
@@ -32,6 +33,50 @@ import {
   getSplitGhostData,
   AIProgressionTarget 
 } from '@/app/actions/aiWorkout';
+
+// localStorage helpers for ghost target caching (versioned + TTL)
+const GHOST_CACHE_KEY = (splitSlug: string) => `eclipse_ghost_${splitSlug}`;
+const GHOST_CACHE_VERSION = 1;
+const GHOST_CACHE_TTL_MS = 7 * 24 * 60 * 60 * 1000; // 7 days
+
+interface GhostCacheEnvelope {
+  version: number;
+  timestamp: number;
+  data: Record<string, GhostTargetInfo>;
+}
+
+function loadCachedGhosts(splitSlug: string): Record<string, GhostTargetInfo> | null {
+  try {
+    const raw = localStorage.getItem(GHOST_CACHE_KEY(splitSlug));
+    if (!raw) return null;
+    const envelope: GhostCacheEnvelope = JSON.parse(raw);
+    // Invalidate on version mismatch or expired TTL
+    if (
+      envelope.version !== GHOST_CACHE_VERSION ||
+      Date.now() - envelope.timestamp > GHOST_CACHE_TTL_MS
+    ) {
+      localStorage.removeItem(GHOST_CACHE_KEY(splitSlug));
+      return null;
+    }
+    return envelope.data;
+  } catch {
+    return null;
+  }
+}
+
+function saveCachedGhosts(splitSlug: string, ghosts: Record<string, GhostTargetInfo>) {
+  try {
+    const envelope: GhostCacheEnvelope = {
+      version: GHOST_CACHE_VERSION,
+      timestamp: Date.now(),
+      data: ghosts,
+    };
+    localStorage.setItem(GHOST_CACHE_KEY(splitSlug), JSON.stringify(envelope));
+  } catch {
+    // ignore quota errors
+  }
+}
+
 
 interface ActiveSetState {
   id: string;
@@ -87,6 +132,30 @@ export default function SplitWorkoutPage() {
   useEffect(() => {
     let isMounted = true;
 
+    // Immediately hydrate from localStorage cache so ghost targets show
+    // instantly even before the network response arrives
+    const cached = loadCachedGhosts(splitData.slug);
+    if (cached && Object.keys(cached).length > 0 && isMounted) {
+      setGhostTargets(cached);
+      const cachedSets: Record<string, ActiveSetState[]> = {};
+      splitData.exercises.forEach((ex) => {
+        const ghostInfo = cached[ex.name];
+        const w = ghostInfo ? ghostInfo.targetWeight : ex.targetWeight;
+        const r = ghostInfo ? ghostInfo.targetReps : ex.targetReps;
+        cachedSets[ex.id] = Array.from({ length: ex.defaultSets }, (_, idx) => ({
+          id: `${ex.id}-set-${idx + 1}`,
+          exerciseName: ex.name,
+          setNumber: idx + 1,
+          targetWeight: w,
+          targetReps: r,
+          actualWeight: w,
+          actualReps: r,
+          isCompleted: false,
+        }));
+      });
+      setExerciseSets(cachedSets);
+    }
+
     async function loadSplitContext() {
       setIsHistoryLoading(true);
 
@@ -100,12 +169,15 @@ export default function SplitWorkoutPage() {
         if (isMounted) setIsHistoryLoading(false);
       }
 
-      // Fetch Ghost benchmark data from Server Action
+      // Fetch Ghost benchmark data from Server Action (overwrites cache if fresh)
       try {
         const ghosts = await getSplitGhostData(splitData.name);
-        if (isMounted) setGhostTargets(ghosts);
+        if (isMounted) {
+          setGhostTargets(ghosts);
+          // Persist fresh server data back to cache
+          saveCachedGhosts(splitData.slug, ghosts);
+        }
 
-        // Build active sets based on exercises and ghost targets
         const initialSets: Record<string, ActiveSetState[]> = {};
         splitData.exercises.forEach((ex) => {
           const ghostInfo = ghosts[ex.name];
@@ -126,7 +198,12 @@ export default function SplitWorkoutPage() {
 
         if (isMounted) setExerciseSets(initialSets);
       } catch (err) {
-        console.warn('Failed to load ghost data:', err);
+        console.warn('Failed to load ghost data, using cached targets:', err);
+        if (!cached) {
+          toast.warning('Could not load ghost targets', {
+            description: 'Using default exercise targets. Check your connection.',
+          });
+        }
       }
     }
 
@@ -253,6 +330,13 @@ export default function SplitWorkoutPage() {
 
         const result = await analyzeSessionProgression(payload);
 
+        // Show toast if rule-based fallback was used instead of Gemini
+        if (result.source === 'fallback') {
+          toast.warning('AI check-in unavailable', {
+            description: 'Using rule-based progressive overload targets instead.',
+          });
+        }
+
         setAiVerdict(result);
         setShowAiModal(true);
         setTargetsSaved(false);
@@ -266,6 +350,9 @@ export default function SplitWorkoutPage() {
         });
       } catch (err) {
         console.error('Failed to analyze session progression:', err);
+        toast.error('AI progression engine unavailable', {
+          description: 'Could not compute targets. Please check your connection and try again.',
+        });
       }
     });
   };
@@ -287,7 +374,12 @@ export default function SplitWorkoutPage() {
     });
 
     setGhostTargets(updatedGhosts);
+    // Persist new AI targets to localStorage so they survive refreshes
+    saveCachedGhosts(splitData.slug, updatedGhosts);
     setTargetsSaved(true);
+    toast.success('Targets saved!', {
+      description: `Next session targets cached for ${splitData.name}.`,
+    });
 
     confetti({
       particleCount: 80,
