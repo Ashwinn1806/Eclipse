@@ -778,7 +778,7 @@ Use strict thermodynamic math: 1kg of body tissue = 7,700 calories. If the user'
       try {
         parsed = JSON.parse(rawText.trim());
       } catch {
-        return fallbackResult;
+        return { success: true, snapshot: fallbackResult };
       }
 
       try {
@@ -796,10 +796,10 @@ Use strict thermodynamic math: 1kg of body tissue = 7,700 calories. If the user'
         console.warn('[Eclipse] WeeklySnapshot write failed (non-fatal):', dbErr);
       }
 
-      return parsed;
+      return { success: true, snapshot: parsed };
     }
 
-    return fallbackResult;
+    return { success: true, snapshot: fallbackResult };
   } catch (error) {
     console.warn('AI generation failed, returning fallback:', error);
     return fallbackResult;

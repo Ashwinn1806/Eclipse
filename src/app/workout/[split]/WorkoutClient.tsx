@@ -1,7 +1,7 @@
 'use client';
 
 import React, { useState, useEffect, useTransition, useOptimistic, useCallback, useRef } from 'react';
-import { useParams } from 'next/navigation';
+import { useParams, useRouter } from 'next/navigation';
 import {
   Dumbbell,
   Ghost,
@@ -259,7 +259,21 @@ function AddExerciseModal({
 // ---------------------------------------------------------------------------
 // Main Workout Page
 // ---------------------------------------------------------------------------
-export default function SplitWorkoutPage() {
+
+interface WorkoutClientProps {
+  splitSlug: string;
+  initialHistory?: Array<{ weekLabel: string; date: string; tonnage: number }>;
+  initialPendingSession?: any;
+  initialServerGhosts?: Record<string, GhostTargetInfo>;
+}
+
+export default function WorkoutClient({
+  splitSlug,
+  initialHistory = [],
+  initialPendingSession = null,
+  initialServerGhosts = {},
+}: WorkoutClientProps) {
+  const router = useRouter();
   const params = useParams();
   const rawSplit = params?.split as string | undefined;
   const splitData = getSplitBySlug(rawSplit || 'push');
@@ -549,7 +563,7 @@ export default function SplitWorkoutPage() {
     const set = block?.sets.find((s) => s.id === setId);
     if (set?.dbId) {
       startSetTransition(async () => {
-        const res = await updateWorkoutSet(set.dbId!, { isDropSet: nextDropState });
+        const res = await updateWorkoutSet(set.dbId!, { isDropSet: nextDropState }); router.refresh();
         if (res.success) {
           toast.success(nextDropState ? 'Marked as Drop Set' : 'Drop set unmarked');
         } else {
@@ -585,7 +599,7 @@ export default function SplitWorkoutPage() {
       const block = exerciseBlocks.find((e) => e.name === exName);
       const set = block?.sets.find((s) => s.id === setId);
       if (set?.dbId) {
-        await updateWorkoutSet(set.dbId, { isCompleted: !set.isCompleted });
+        await updateWorkoutSet(set.dbId, { isCompleted: !set.isCompleted }); router.refresh();
       }
     });
   }, [exerciseBlocks]);
@@ -618,7 +632,7 @@ export default function SplitWorkoutPage() {
         targetReps: typeof set.targetReps === 'number' ? set.targetReps : undefined,
         actualWeight: typeof set.actualWeight === 'number' ? set.actualWeight : undefined,
         actualReps: typeof set.actualReps === 'number' ? set.actualReps : undefined,
-      });
+      }); router.refresh();
       if (!res.success) {
         toast.error('Failed to save set changes');
       }
@@ -658,7 +672,7 @@ export default function SplitWorkoutPage() {
       const last = block?.sets[block.sets.length - 1];
       const w = typeof last?.actualWeight === 'number' ? last.actualWeight : 20;
       const r = typeof last?.actualReps === 'number' ? last.actualReps : 10;
-      const res = await addSetToExercise(sessionId, exName, w, r);
+      const res = await addSetToExercise(sessionId, exName, w, r); router.refresh();
       if (res.success && res.set) {
         // Replace local id with real DB id
         setExerciseBlocks((prev) => prev.map((ex) => {
@@ -695,7 +709,7 @@ export default function SplitWorkoutPage() {
 
     if (set?.dbId) {
       startSetTransition(async () => {
-        const res = await deleteWorkoutSet(set.dbId!);
+        const res = await deleteWorkoutSet(set.dbId!); router.refresh();
         if (!res.success) toast.error('Failed to delete set from DB');
         else toast.success('Set removed');
       });
@@ -718,7 +732,7 @@ export default function SplitWorkoutPage() {
     if (sessionId) {
       startSetTransition(async () => {
         const orders = newBlocks.map((b, idx) => ({ exerciseName: b.name, orderIndex: idx }));
-        const res = await updateExerciseOrder(sessionId, orders);
+        const res = await updateExerciseOrder(sessionId, orders); router.refresh();
         if (res.success) {
           toast.success('Exercise layout saved!');
         } else {
@@ -744,7 +758,7 @@ export default function SplitWorkoutPage() {
     const set = block?.sets.find((s) => s.id === setId);
     if (set?.dbId) {
       startSetTransition(async () => {
-        const res = await updateWorkoutSet(set.dbId!, { rpe: newRpe });
+        const res = await updateWorkoutSet(set.dbId!, { rpe: newRpe }); router.refresh();
         if (res.success) {
           toast.success(`Set RPE updated to ${newRpe}`);
         }
@@ -779,7 +793,7 @@ export default function SplitWorkoutPage() {
       );
 
       if (sessionId) {
-        const res = await renameExerciseInSession(sessionId, oldName, newName);
+        const res = await renameExerciseInSession(sessionId, oldName, newName); router.refresh();
         if (res.success) {
           toast.success(`Renamed to "${newName}"`);
         } else {
@@ -809,7 +823,7 @@ export default function SplitWorkoutPage() {
       setExerciseBlocks((prev) => prev.filter((e) => e.name !== exName));
 
       if (sessionId) {
-        const res = await deleteExerciseFromSession(sessionId, exName);
+        const res = await deleteExerciseFromSession(sessionId, exName); router.refresh();
         if (res.success) {
           toast.success(`"${exName}" removed`);
         } else {
@@ -852,7 +866,7 @@ export default function SplitWorkoutPage() {
       dispatchOptimisticExerciseBlocks({ type: 'add', block: newBlock });
       setExerciseBlocks((prev) => [...prev, newBlock]);
 
-      const res = await addExerciseToSession(splitData.name, { name, type, sets });
+      const res = await addExerciseToSession(splitData.name, { name, type, sets }); router.refresh();
       if (res.success) {
         if (res.sessionId) setSessionId(res.sessionId);
         if (res.sets) {
@@ -900,7 +914,7 @@ export default function SplitWorkoutPage() {
             rpe: s.rpe ?? 7,
           })),
         };
-        const result = await analyzeSessionProgression(payload);
+        const result = await analyzeSessionProgression(payload); router.refresh();
         if (result.source === 'fallback') {
           toast.warning('AI check-in unavailable', { description: 'Using rule-based progressive overload targets.' });
         }

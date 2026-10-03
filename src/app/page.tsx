@@ -1,10 +1,10 @@
 export const dynamic = 'force-dynamic';
 export const fetchCache = 'force-no-store';
 
-﻿import { auth } from '@/auth';
-import { redirect } from 'next/navigation';
+import { auth } from '@/auth';
 import EclipseDashboard from './EclipseDashboard';
 import LoginWall from '@/components/LoginWall';
+import { getTodayNutrition, getActiveUserGoal, getWeeklyWeightLogs } from '@/app/actions';
 
 export default async function RootPage() {
   const session = await auth();
@@ -14,8 +14,12 @@ export default async function RootPage() {
     return <LoginWall />;
   }
 
-  // First-time user with no goal set — redirect to onboarding
-  // (EclipseDashboard handles the case gracefully too, but redirect is cleaner)
+  const [nutritionEntries, userGoal, weightLogs] = await Promise.all([
+    getTodayNutrition(),
+    getActiveUserGoal(),
+    getWeeklyWeightLogs(),
+  ]);
+
   return (
     <EclipseDashboard
       user={{
@@ -23,6 +27,13 @@ export default async function RootPage() {
         email: session.user.email ?? '',
         image: session.user.image ?? '',
       }}
+      initialGoal={userGoal ? {
+        targetDailyCals: userGoal.targetDailyCals,
+        targetDailyProtein: userGoal.targetDailyProtein,
+        targetDailyWaterMl: userGoal.targetDailyWaterMl,
+      } : null}
+      initialNutritionEntries={nutritionEntries || []}
+      initialWeightLogs={(weightLogs || []).map((l) => ({ date: l.date, weightKg: l.morningWeight ?? 70 }))}
     />
   );
 }
