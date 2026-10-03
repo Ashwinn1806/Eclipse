@@ -190,6 +190,8 @@ model WorkoutSet {
   actualReps   Int?           @map("actual_reps")
   isCompleted  Boolean        @default(false) @map("is_completed")
   isDropSet    Boolean        @default(false) @map("is_drop_set")
+  rpe          Int?           @default(7) @map("rpe")
+  orderIndex   Int            @default(0) @map("order_index")
   createdAt    DateTime       @default(now()) @map("created_at")
 
   session      WorkoutSession @relation(fields: [sessionId], references: [id], onDelete: Cascade)

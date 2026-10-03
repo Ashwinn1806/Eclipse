@@ -20,6 +20,8 @@ import {
   Trash2,
   Save,
   MoreVertical,
+  ChevronUp,
+  ChevronDown,
 } from 'lucide-react';
 import confetti from 'canvas-confetti';
 import { toast } from 'sonner';
@@ -38,6 +40,7 @@ import {
   renameExerciseInSession,
   addExerciseToSession,
   getPendingSessionWithSets,
+  updateExerciseOrder,
 } from '@/app/actions';
 
 // ---------------------------------------------------------------------------
@@ -115,6 +118,7 @@ interface SetRow {
   actualReps: number | '';
   isCompleted: boolean;
   isDropSet: boolean;
+  rpe?: number;
   isPersisted: boolean; // is this set from the DB?
 }
 
@@ -313,6 +317,7 @@ export default function SplitWorkoutPage() {
   const [isAnalyzing, startAnalysisTransition] = useTransition();
   const [showAiModal, setShowAiModal] = useState(false);
   const [aiVerdict, setAiVerdict] = useState<{
+    analysis?: string;
     recommendations: AIProgressionTarget[];
     totalTonnage: number;
     source: 'ai' | 'fallback';
@@ -392,6 +397,7 @@ export default function SplitWorkoutPage() {
               actualReps: s.actualReps ?? '',
               isCompleted: s.isCompleted,
               isDropSet: (s as any).isDropSet ?? false,
+              rpe: (s as any).rpe ?? 7,
               isPersisted: true,
             });
           }
@@ -697,6 +703,56 @@ export default function SplitWorkoutPage() {
   }, [exerciseBlocks]);
 
   // -------------------------------------------------------------------------
+  // EXERCISE — reorder up/down
+  // -------------------------------------------------------------------------
+  const handleMoveExercise = useCallback((index: number, direction: -1 | 1) => {
+    const targetIndex = index + direction;
+    if (targetIndex < 0 || targetIndex >= exerciseBlocks.length) return;
+
+    const newBlocks = [...exerciseBlocks];
+    const [moved] = newBlocks.splice(index, 1);
+    newBlocks.splice(targetIndex, 0, moved);
+
+    setExerciseBlocks(newBlocks);
+
+    if (sessionId) {
+      startSetTransition(async () => {
+        const orders = newBlocks.map((b, idx) => ({ exerciseName: b.name, orderIndex: idx }));
+        const res = await updateExerciseOrder(sessionId, orders);
+        if (res.success) {
+          toast.success('Exercise layout saved!');
+        } else {
+          toast.error('Failed to save exercise order');
+        }
+      });
+    }
+  }, [exerciseBlocks, sessionId]);
+
+  // -------------------------------------------------------------------------
+  // SET — update RPE
+  // -------------------------------------------------------------------------
+  const handleUpdateRpe = useCallback((exName: string, setId: string, newRpe: number) => {
+    setExerciseBlocks((prev) => prev.map((ex) => {
+      if (ex.name !== exName) return ex;
+      return {
+        ...ex,
+        sets: ex.sets.map((s) => (s.id === setId ? { ...s, rpe: newRpe } : s)),
+      };
+    }));
+
+    const block = exerciseBlocks.find((e) => e.name === exName);
+    const set = block?.sets.find((s) => s.id === setId);
+    if (set?.dbId) {
+      startSetTransition(async () => {
+        const res = await updateWorkoutSet(set.dbId!, { rpe: newRpe });
+        if (res.success) {
+          toast.success(`Set RPE updated to ${newRpe}`);
+        }
+      });
+    }
+  }, [exerciseBlocks]);
+
+  // -------------------------------------------------------------------------
   // EXERCISE — start rename
   // -------------------------------------------------------------------------
   const startRename = (exName: string) => {
@@ -841,6 +897,7 @@ export default function SplitWorkoutPage() {
             actualWeight: typeof s.actualWeight === 'number' ? s.actualWeight : s.targetWeight,
             actualReps: typeof s.actualReps === 'number' ? s.actualReps : s.targetReps,
             isDropSet: s.isDropSet,
+            rpe: s.rpe ?? 7,
           })),
         };
         const result = await analyzeSessionProgression(payload);
@@ -1012,7 +1069,7 @@ export default function SplitWorkoutPage() {
             <Loader2 size={18} className="animate-spin text-cyan-400" />Loading exercises...
           </div>
         ) : (
-          optimisticExerciseBlocks.map((exercise) => {
+          optimisticExerciseBlocks.map((exercise, exerciseIdx) => {
             const ghost = ghostTargets[exercise.name];
             const ghostW = ghost?.ghostWeight ?? exercise.sets[0]?.targetWeight ?? 20;
             const ghostR = ghost?.ghostReps ?? exercise.sets[0]?.targetReps ?? 10;
@@ -1062,8 +1119,24 @@ export default function SplitWorkoutPage() {
                     </div>
                   </div>
 
-                  {/* Top-right card actions (Delete button & Menu) */}
+                  {/* Top-right card actions (Reorder Up/Down & Delete) */}
                   <div className="flex items-center gap-1.5 shrink-0">
+                    <button
+                      onClick={() => handleMoveExercise(exerciseIdx, -1)}
+                      disabled={exerciseIdx === 0}
+                      className="w-8 h-8 rounded-xl bg-slate-800 text-slate-400 hover:text-cyan-400 disabled:opacity-30 disabled:hover:text-slate-400 flex items-center justify-center transition-all border border-white/5"
+                      title="Move Up"
+                    >
+                      <ChevronUp size={15} />
+                    </button>
+                    <button
+                      onClick={() => handleMoveExercise(exerciseIdx, 1)}
+                      disabled={exerciseIdx === optimisticExerciseBlocks.length - 1}
+                      className="w-8 h-8 rounded-xl bg-slate-800 text-slate-400 hover:text-cyan-400 disabled:opacity-30 disabled:hover:text-slate-400 flex items-center justify-center transition-all border border-white/5"
+                      title="Move Down"
+                    >
+                      <ChevronDown size={15} />
+                    </button>
                     <button
                       onClick={() => handleDeleteExercise(exercise.name)}
                       className="w-8 h-8 rounded-xl bg-slate-800 text-slate-400 hover:text-red-400 hover:bg-red-500/10 flex items-center justify-center transition-all border border-white/5"
@@ -1146,6 +1219,22 @@ export default function SplitWorkoutPage() {
                           >
                             DROP
                           </button>
+
+                          {/* RPE Selector */}
+                          <div className="relative shrink-0">
+                            <select
+                              value={set.rpe ?? 7}
+                              onChange={(e) => handleUpdateRpe(exercise.name, set.id, Number(e.target.value))}
+                              className="bg-slate-950 border border-slate-800 rounded-xl px-1.5 py-1.5 text-[10px] font-bold text-cyan-400 focus:border-cyan-500 outline-none cursor-pointer"
+                              title="Rate of Perceived Exertion (1-10)"
+                            >
+                              {[1, 2, 3, 4, 5, 6, 7, 8, 9, 10].map((num) => (
+                                <option key={num} value={num} className="bg-slate-900 text-slate-200">
+                                  RPE {num}
+                                </option>
+                              ))}
+                            </select>
+                          </div>
 
                           {/* Complete button */}
                           <button
@@ -1255,6 +1344,17 @@ export default function SplitWorkoutPage() {
                 </p>
               </div>
             </div>
+
+            {aiVerdict.analysis && (
+              <div className="p-4 bg-indigo-950/60 border border-indigo-500/30 rounded-2xl space-y-1">
+                <span className="text-[10px] text-indigo-400 font-bold uppercase tracking-wider block">
+                  Coach Chain of Thought Evaluation
+                </span>
+                <p className="text-xs text-indigo-200 leading-relaxed font-medium italic">
+                  &quot;{aiVerdict.analysis}&quot;
+                </p>
+              </div>
+            )}
 
             <div className="space-y-3">
               <h4 className="text-xs font-black text-slate-400 uppercase tracking-wider">Tailored Prescription &amp; Reasons</h4>

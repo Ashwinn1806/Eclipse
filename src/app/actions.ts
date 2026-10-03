@@ -323,7 +323,7 @@ export async function logWorkoutSet(exerciseName: string, actualWeight: number, 
 // ---------------------------------------------------------------------------
 export async function updateWorkoutSet(
   setId: string,
-  data: { targetWeight?: number; targetReps?: number; actualWeight?: number; actualReps?: number; isCompleted?: boolean; isDropSet?: boolean }
+  data: { targetWeight?: number; targetReps?: number; actualWeight?: number; actualReps?: number; isCompleted?: boolean; isDropSet?: boolean; rpe?: number; orderIndex?: number }
 ) {
   await getSessionUserId();
   try {
@@ -332,9 +332,37 @@ export async function updateWorkoutSet(
       data,
     });
     revalidatePath('/workout/[split]', 'page');
+    revalidatePath('/');
     return { success: true, set: updated };
   } catch (error) {
     console.warn('updateWorkoutSet failed:', error);
+    return { success: false, error: String(error) };
+  }
+}
+
+
+// ---------------------------------------------------------------------------
+// WORKOUT EXERCISE — REORDER EXERCISES IN SESSION
+// ---------------------------------------------------------------------------
+export async function updateExerciseOrder(
+  sessionId: string,
+  exerciseOrders: Array<{ exerciseName: string; orderIndex: number }>
+) {
+  await getSessionUserId();
+  try {
+    await Promise.all(
+      exerciseOrders.map((eo) =>
+        prisma.workoutSet.updateMany({
+          where: { sessionId, exerciseName: eo.exerciseName },
+          data: { orderIndex: eo.orderIndex },
+        })
+      )
+    );
+    revalidatePath('/workout/[split]', 'page');
+    revalidatePath('/');
+    return { success: true };
+  } catch (error) {
+    console.warn('updateExerciseOrder failed:', error);
     return { success: false, error: String(error) };
   }
 }
@@ -699,9 +727,11 @@ export async function mockOrRunAICheckIn() {
     const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
 
     const prompt = `Goal: ${goalType}
-7-Day Weight Avg: ${weeklyAvgWeight}kg (Delta: ${weightDelta}kg)${weightContext}
-Current Target: ${targetCals} kcal, ${targetProtein}g protein.${nutritionContext}
-Based on the weight trend data, determine if calorie/protein targets should increase, decrease, or stay the same. Return concrete new values.`;
+7-Day Weight Avg: ${weeklyAvgWeight}kg (7-Day Weight Delta: ${weightDelta}kg)${weightContext}
+Current Targets: ${targetCals} kcal, ${targetProtein}g protein.${nutritionContext}
+
+THERMODYNAMIC MACRO MATH INSTRUCTION:
+Use strict thermodynamic math: 1kg of body tissue = 7,700 calories. If the user's 7-day weight trend shows a loss of 0.5kg, they are in a ~3,850 weekly calorie deficit (550 kcal/day). Calculate their exact TDEE based on this delta, and output a precise daily calorie and protein target to reach their goal.`;
 
     const config = {
       systemInstruction: MACRO_CHECKIN_PERSONA,
