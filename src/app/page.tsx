@@ -1,3 +1,6 @@
+export const dynamic = 'force-dynamic';
+export const fetchCache = 'force-no-store';
+
 ﻿import { auth } from '@/auth';
 import { redirect } from 'next/navigation';
 import EclipseDashboard from './EclipseDashboard';

@@ -126,7 +126,7 @@ export async function addNutritionEntry(data: {
         isCompleted: true,
       }
     });
-    revalidatePath('/');
+    revalidatePath('/', 'layout');
     return entry;
   } catch (error) {
     console.warn("DB offline or unreachable, falling back to local store:", error);
@@ -155,7 +155,7 @@ export async function toggleNutritionItem(id: string, isCompleted: boolean) {
       where: { id },
       data: { isCompleted }
     });
-    revalidatePath('/');
+    revalidatePath('/', 'layout');
     return entry;
   } catch (error) {
     console.warn("DB offline or unreachable, falling back to local store:", error);
@@ -176,7 +176,7 @@ export async function updateNutritionEntry(
       where: { id },
       data,
     });
-    revalidatePath('/');
+    revalidatePath('/', 'layout');
     return { success: true, entry };
   } catch (error) {
     console.warn('updateNutritionEntry failed:', error);
@@ -191,7 +191,7 @@ export async function deleteNutritionEntry(id: string) {
   await getSessionUserId();
   try {
     await prisma.nutritionEntry.delete({ where: { id } });
-    revalidatePath('/');
+    revalidatePath('/', 'layout');
     return { success: true };
   } catch (error) {
     console.warn('deleteNutritionEntry failed:', error);
@@ -237,8 +237,8 @@ export async function updateUserGoal(data: {
         where: { id: existing.id },
         data,
       });
-      revalidatePath('/');
-      return { success: true, goal: updated };
+      revalidatePath('/', 'layout');
+    return { success: true, goal: updated };
     } else {
       // Create a new goal if none exists
       const newGoal = await prisma.userGoal.create({
@@ -254,8 +254,8 @@ export async function updateUserGoal(data: {
           isActive: true,
         },
       });
-      revalidatePath('/');
-      return { success: true, goal: newGoal };
+      revalidatePath('/', 'layout');
+    return { success: true, goal: newGoal };
     }
   } catch (error) {
     console.warn('updateUserGoal failed:', error);
@@ -331,8 +331,7 @@ export async function updateWorkoutSet(
       where: { id: setId },
       data,
     });
-    revalidatePath('/workout/[split]', 'page');
-    revalidatePath('/');
+    revalidatePath('/', 'layout');
     return { success: true, set: updated };
   } catch (error) {
     console.warn('updateWorkoutSet failed:', error);
@@ -358,8 +357,7 @@ export async function updateExerciseOrder(
         })
       )
     );
-    revalidatePath('/workout/[split]', 'page');
-    revalidatePath('/');
+    revalidatePath('/', 'layout');
     return { success: true };
   } catch (error) {
     console.warn('updateExerciseOrder failed:', error);
@@ -374,7 +372,7 @@ export async function deleteWorkoutSet(setId: string) {
   await getSessionUserId();
   try {
     await prisma.workoutSet.delete({ where: { id: setId } });
-    revalidatePath('/workout/[split]', 'page');
+    revalidatePath('/', 'layout');
     return { success: true };
   } catch (error) {
     console.warn('deleteWorkoutSet failed:', error);
@@ -430,7 +428,7 @@ export async function addExerciseToSession(
       )
     );
 
-    revalidatePath('/workout/[split]', 'page');
+    revalidatePath('/', 'layout');
     return { success: true, sessionId: session.id, sets: createdSets };
   } catch (error) {
     console.warn('addExerciseToSession failed:', error);
@@ -452,7 +450,7 @@ export async function renameExerciseInSession(
       where: { sessionId, exerciseName: oldName },
       data: { exerciseName: newName },
     });
-    revalidatePath('/workout/[split]', 'page');
+    revalidatePath('/', 'layout');
     return { success: true };
   } catch (error) {
     console.warn('renameExerciseInSession failed:', error);
@@ -469,7 +467,7 @@ export async function deleteExerciseFromSession(sessionId: string, exerciseName:
     await prisma.workoutSet.deleteMany({
       where: { sessionId, exerciseName },
     });
-    revalidatePath('/workout/[split]', 'page');
+    revalidatePath('/', 'layout');
     return { success: true };
   } catch (error) {
     console.warn('deleteExerciseFromSession failed:', error);
@@ -505,7 +503,7 @@ export async function addSetToExercise(
         isCompleted: false,
       },
     });
-    revalidatePath('/workout/[split]', 'page');
+    revalidatePath('/', 'layout');
     return { success: true, set: created };
   } catch (error) {
     console.warn('addSetToExercise failed:', error);
@@ -580,7 +578,7 @@ export async function logDailyWeight(weightKg: number) {
       update: { morningWeight: weightKg, updatedAt: new Date() },
       create: { userId, date: today, morningWeight: weightKg },
     });
-    revalidatePath('/');
+    revalidatePath('/', 'layout');
     return { success: true, log };
   } catch (error) {
     console.warn('logDailyWeight failed:', error);
@@ -853,7 +851,7 @@ export async function loadDefaultDailyDiet(targetDate?: string) {
       )
     );
 
-    revalidatePath('/');
+    revalidatePath('/', 'layout');
     return { success: true, count: entries.length, entries };
   } catch (error) {
     console.warn('loadDefaultDailyDiet failed:', error);
