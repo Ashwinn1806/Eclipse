@@ -5,11 +5,39 @@ import { prisma } from '@/lib/prisma';
 import { auth } from '@/auth';
 
 async function getSessionUserId(): Promise<string> {
-  const session = await auth();
-  if (!session?.user?.id) {
+  let userId: string | null = null;
+  try {
+    const session = await auth();
+    userId = session?.user?.id ?? null;
+  } catch (err) {
+    console.warn('[Eclipse Auth] Error fetching session:', err);
+  }
+
+  if (!userId && process.env.NODE_ENV === 'development') {
+    userId = 'local-dev-user';
+  }
+
+  if (!userId) {
     throw new Error('Unauthorized');
   }
-  return session.user.id;
+
+  if (userId === 'local-dev-user') {
+    try {
+      await prisma.user.upsert({
+        where: { id: 'local-dev-user' },
+        update: {},
+        create: {
+          id: 'local-dev-user',
+          name: 'Ashwin Verma',
+          email: 'ashwin@local.dev',
+        },
+      });
+    } catch (err) {
+      console.warn('[Eclipse DB] Dev user upsert non-fatal error:', err);
+    }
+  }
+
+  return userId;
 }
 
 export interface WorkoutSetData {
@@ -19,6 +47,7 @@ export interface WorkoutSetData {
   targetReps: number;
   actualWeight: number;
   actualReps: number;
+  isDropSet?: boolean;
 }
 
 export interface WorkoutSessionInput {
@@ -75,11 +104,12 @@ export async function analyzeSessionProgression(
     targetReps: s.targetReps,
     actualWeight: `${s.actualWeight}kg`,
     actualReps: s.actualReps,
+    isDropSet: !!s.isDropSet,
     metTarget: s.actualReps >= s.targetReps,
     deltaReps: s.actualReps - s.targetReps,
   }));
 
-  const systemInstruction = `You are an elite strength coach. Analyze completed workout sets and prescribe progressive overload weights and reps for the next session. If the user met or exceeded target reps, prescribe a 2.5kg to 5kg weight increase for their next session. If they missed reps, maintain weight and adjust rep targets.`;
+  const systemInstruction = `You are an elite strength coach. Analyze completed workout sets and prescribe progressive overload weights and reps for the next session. If the user met or exceeded target reps, prescribe a 2.5kg to 5kg weight increase for their next session. If they missed reps, maintain weight and adjust rep targets. IMPORTANT DROP SET RULE: If a set has isDropSet: true, the user is intentionally lowering the weight to reach mechanical failure. Do not penalize their progression score for a weight drop on these specific sets, and plan future drop set targets focusing on rep volume rather than weight load.`;
 
   const promptDirective = `Completed Session Data:
 ${JSON.stringify(setsDescription, null, 2)}`;

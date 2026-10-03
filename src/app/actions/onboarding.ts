@@ -1,4 +1,4 @@
-﻿'use server';
+'use server';
 
 import { auth } from '@/auth';
 import { prisma } from '@/lib/prisma';
@@ -16,11 +16,37 @@ interface OnboardingData {
 
 /** Save (upsert) the user's onboarding goal into the database. */
 export async function saveOnboardingGoal(data: OnboardingData) {
-  const session = await auth();
-  if (!session?.user?.id) {
+  let userId: string | null = null;
+  try {
+    const session = await auth();
+    userId = session?.user?.id ?? null;
+  } catch (err) {
+    console.warn('[Eclipse Auth] Error fetching session:', err);
+  }
+
+  if (!userId && process.env.NODE_ENV === 'development') {
+    userId = 'local-dev-user';
+  }
+
+  if (!userId) {
     throw new Error('Unauthorized');
   }
-  const userId = session.user.id;
+
+  if (userId === 'local-dev-user') {
+    try {
+      await prisma.user.upsert({
+        where: { id: 'local-dev-user' },
+        update: {},
+        create: {
+          id: 'local-dev-user',
+          name: 'Ashwin Verma',
+          email: 'ashwin@local.dev',
+        },
+      });
+    } catch (err) {
+      console.warn('[Eclipse DB] Dev user upsert non-fatal error:', err);
+    }
+  }
 
   // Calculate a reasonable target date (12 weeks out)
   const targetDate = new Date();

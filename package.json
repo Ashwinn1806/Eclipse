@@ -9,9 +9,14 @@
     "lint": "eslint",
     "postinstall": "prisma generate"
   },
+  "prisma": {
+    "seed": "tsx prisma/seed.ts"
+  },
   "dependencies": {
     "@auth/prisma-adapter": "^2.11.3",
     "@google/genai": "^2.24.0",
+    "@neondatabase/serverless": "^1.1.0",
+    "@prisma/adapter-neon": "^7.10.0",
     "@prisma/client": "^6.4.1",
     "canvas-confetti": "^1.9.4",
     "lucide-react": "^1.48.0",
