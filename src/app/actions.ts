@@ -835,7 +835,7 @@ export async function createNewSplit() {
         totalTonnage: 0,
         isCompleted: false,
         sets: {
-          create: newSplit.exercises[0]?.presetSets?.map((ps) => ({
+          create: newSplit.exercises[0]?.presetSets?.map((ps, idx) => ({
             exerciseName: newSplit.exercises[0]?.name || 'Bench Press',
             setNumber: ps.setNumber,
             targetWeight: ps.targetWeight,
@@ -843,6 +843,7 @@ export async function createNewSplit() {
             actualWeight: null,
             actualReps: null,
             isCompleted: false,
+            orderIndex: idx,
           })) || [
             {
               exerciseName: 'Bench Press',
@@ -852,6 +853,7 @@ export async function createNewSplit() {
               actualWeight: null,
               actualReps: null,
               isCompleted: false,
+              orderIndex: 0,
             },
           ],
         },
@@ -861,9 +863,9 @@ export async function createNewSplit() {
     revalidatePath('/', 'layout');
     revalidatePath('/workout/[split]', 'layout');
     return { success: true, newSplit, session };
-  } catch (err) {
-    console.warn('createNewSplit failed:', err);
-    return { success: false, error: String(err) };
+  } catch (error: any) {
+    console.error("PRISMA DATABASE ERROR:", error);
+    throw new Error(error?.message || String(error));
   }
 }
 

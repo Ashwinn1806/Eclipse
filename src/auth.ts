@@ -5,10 +5,20 @@ import { prisma } from '@/lib/prisma';
 
 const googleClientId = process.env.AUTH_GOOGLE_ID || process.env.GOOGLE_CLIENT_ID;
 const googleClientSecret = process.env.AUTH_GOOGLE_SECRET || process.env.GOOGLE_CLIENT_SECRET;
+
 const dynamicNextAuthUrl =
   process.env.NEXTAUTH_URL ||
-  (process.env.VERCEL_URL ? `https://${process.env.VERCEL_URL}` : 'http://localhost:3000');
-const authSecret = process.env.AUTH_SECRET || process.env.NEXTAUTH_SECRET;
+  process.env.AUTH_URL ||
+  (process.env.VERCEL_URL
+    ? process.env.VERCEL_URL.startsWith('http')
+      ? process.env.VERCEL_URL
+      : `https://${process.env.VERCEL_URL}`
+    : 'http://localhost:3000');
+
+const authSecret =
+  process.env.AUTH_SECRET ||
+  process.env.NEXTAUTH_SECRET ||
+  'eclipse-production-fallback-secret-key-32-chars-min!';
 
 // Gracefully populate environment variables if missing so NextAuth resolves production host properly
 if (!process.env.NEXTAUTH_URL) {
@@ -17,14 +27,19 @@ if (!process.env.NEXTAUTH_URL) {
 if (!process.env.AUTH_URL) {
   process.env.AUTH_URL = dynamicNextAuthUrl;
 }
-
-if (!authSecret) {
-  console.warn(
-    'WARNING: NEXTAUTH_SECRET / AUTH_SECRET is missing from environment variables. Using fallback secret to prevent runtime configuration crash.'
-  );
+if (!process.env.AUTH_SECRET) {
+  process.env.AUTH_SECRET = authSecret;
+}
+if (!process.env.NEXTAUTH_SECRET) {
+  process.env.NEXTAUTH_SECRET = authSecret;
 }
 
 if (process.env.NODE_ENV === 'production') {
+  if (!process.env.AUTH_SECRET && !process.env.NEXTAUTH_SECRET) {
+    console.warn(
+      'WARNING: NEXTAUTH_SECRET / AUTH_SECRET is missing from environment variables. Using fallback secret to prevent runtime configuration crash.'
+    );
+  }
   if (!googleClientId) {
     console.warn('WARNING: AUTH_GOOGLE_ID (or GOOGLE_CLIENT_ID) is missing from environment variables.');
   }
@@ -35,7 +50,7 @@ if (process.env.NODE_ENV === 'production') {
 
 const nextAuthInstance = NextAuth({
   trustHost: true,
-  secret: authSecret || 'fallback-secret-for-production-warning-only',
+  secret: authSecret,
   adapter: PrismaAdapter(prisma),
   providers: [
     Google({
