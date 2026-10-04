@@ -116,6 +116,7 @@ model NutritionEntry {
   proteinG    Float    @map("protein_g")
   waterMl     Int      @default(0) @map("water_ml") // Water volume in ml (for Water category items)
   isCompleted Boolean  @default(false) @map("is_completed")
+  orderIndex  Int      @default(0) @map("order_index")
   createdAt   DateTime @default(now()) @map("created_at")
 
   user        User     @relation(fields: [userId], references: [id], onDelete: Cascade)

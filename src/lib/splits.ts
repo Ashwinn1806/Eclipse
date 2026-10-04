@@ -30,7 +30,7 @@ export interface SplitDefinition {
   exercises: ExerciseTemplate[];
 }
 
-export const USER_SPLITS: SplitDefinition[] = [
+export let USER_SPLITS: SplitDefinition[] = [
   {
     slug: 'push',
     name: 'Day 1: Push Day',
@@ -717,3 +717,103 @@ export function getSplitBySlug(slug: string): SplitDefinition {
   );
   return match || USER_SPLITS[0];
 }
+
+export function deleteAndReindexMemorySplit(splitId: string): SplitDefinition[] {
+  const normalized = splitId.toLowerCase().trim();
+  USER_SPLITS = USER_SPLITS.filter((s) => {
+    const slugNorm = s.slug.toLowerCase().trim();
+    const nameNorm = s.name.toLowerCase().trim();
+    return (
+      slugNorm !== normalized &&
+      !nameNorm.includes(normalized) &&
+      !normalized.includes(slugNorm)
+    );
+  });
+
+  // Re-index remaining splits sequentially: Day 1, Day 2, Day 3...
+  USER_SPLITS = USER_SPLITS.map((s, idx) => {
+    const newDayNum = idx + 1;
+    const cleanedName = s.name.replace(/^Day\s+\d+:\s*/i, '');
+    return {
+      ...s,
+      name: `Day ${newDayNum}: ${cleanedName}`,
+    };
+  });
+
+  return USER_SPLITS;
+}
+
+export function reorderMemorySplit(splitId: string, direction: 'up' | 'down'): SplitDefinition[] {
+  const normalized = splitId.toLowerCase().trim();
+  const index = USER_SPLITS.findIndex(
+    (s) => s.slug.toLowerCase().trim() === normalized || s.name.toLowerCase().includes(normalized)
+  );
+
+  if (index === -1) return USER_SPLITS;
+  const targetIndex = direction === 'up' ? index - 1 : index + 1;
+  if (targetIndex < 0 || targetIndex >= USER_SPLITS.length) return USER_SPLITS;
+
+  // Swap elements
+  const temp = USER_SPLITS[index];
+  USER_SPLITS[index] = USER_SPLITS[targetIndex];
+  USER_SPLITS[targetIndex] = temp;
+
+  // Re-index titles sequentially
+  USER_SPLITS = USER_SPLITS.map((s, idx) => {
+    const newDayNum = idx + 1;
+    const cleanedName = s.name.replace(/^Day\s+\d+:\s*/i, '');
+    return {
+      ...s,
+      name: `Day ${newDayNum}: ${cleanedName}`,
+    };
+  });
+
+  return USER_SPLITS;
+}
+
+export function addMemorySplit(): SplitDefinition {
+  let maxDayNum = USER_SPLITS.length;
+  for (const s of USER_SPLITS) {
+    const match = s.name.match(/^Day\s+(\d+):/i);
+    if (match) {
+      const num = parseInt(match[1], 10);
+      if (num > maxDayNum) maxDayNum = num;
+    }
+  }
+  const newDayNum = maxDayNum + 1;
+  const timestamp = Date.now();
+  const newSlug = `custom-${timestamp}`;
+  const newSplit: SplitDefinition = {
+    slug: newSlug,
+    name: `Day ${newDayNum}: New Session`,
+    shortName: `Day ${newDayNum}`,
+    subtitle: 'Custom Muscle Focus',
+    focus: 'Hypertrophy & Strength',
+    iconName: 'dumbbell',
+    colorGradient: 'from-cyan-500 via-teal-400 to-emerald-400',
+    accentColor: '#06b6d4',
+    defaultTonnage: [4500, 4800, 5200, 5600],
+    exercises: [
+      {
+        id: `custom-ex-${timestamp}`,
+        name: 'Bench Press',
+        category: 'Compound · Chest',
+        targetWeight: 20,
+        targetReps: 10,
+        defaultSets: 3,
+        restSeconds: 90,
+        isCompound: true,
+        presetSets: [
+          { setNumber: 1, targetWeight: 20, targetReps: 10, isDropSet: false },
+          { setNumber: 2, targetWeight: 20, targetReps: 10, isDropSet: false },
+          { setNumber: 3, targetWeight: 20, targetReps: 10, isDropSet: false },
+        ],
+      },
+    ],
+  };
+  USER_SPLITS.push(newSplit);
+  return newSplit;
+}
+
+
+

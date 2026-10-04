@@ -1,12 +1,11 @@
 {
-  "name": "Eclipse",
+  "name": "Eclipse Progression Engine",
   "short_name": "Eclipse",
-  "description": "Mobile-first intelligent gym workout tracker, Notion-style nutrition log, and AI macro check-in engine.",
+  "description": "Commercial-Grade Intelligent Offline-Capable Gym & Nutrition Tracker",
   "start_url": "/",
   "display": "standalone",
-  "background_color": "#020617",
-  "theme_color": "#020617",
-  "orientation": "portrait-primary",
+  "background_color": "#040812",
+  "theme_color": "#040812",
   "icons": [
     {
       "src": "/favicon.ico",

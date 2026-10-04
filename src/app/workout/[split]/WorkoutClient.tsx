@@ -1,7 +1,8 @@
 'use client';
 
-import React, { useState, useEffect, useTransition, useOptimistic, useCallback, useRef } from 'react';
+import React, { useState, useEffect, useTransition, useOptimistic, useCallback, useRef, useMemo } from 'react';
 import { useParams, useRouter } from 'next/navigation';
+import AppHeader from '@/components/AppHeader';
 import {
   Dumbbell,
   Ghost,
@@ -22,15 +23,25 @@ import {
   MoreVertical,
   ChevronUp,
   ChevronDown,
+  AlertTriangle,
+  Copy,
 } from 'lucide-react';
 import confetti from 'canvas-confetti';
 import { toast } from 'sonner';
 import { getSplitBySlug } from '@/lib/splits';
 import {
+  enqueueOfflineMutation,
+  getOfflineMutations,
+  clearOfflineMutations,
+  processOfflineQueue,
+} from '@/lib/offlineSync';
+import {
   analyzeSessionProgression,
   getSplitTonnageHistory,
   getSplitGhostData,
   AIProgressionTarget,
+  parseAndImportWorkout,
+  applyProgressionAndCompleteSession,
 } from '@/app/actions/aiWorkout';
 import {
   updateWorkoutSet,
@@ -41,6 +52,8 @@ import {
   addExerciseToSession,
   getPendingSessionWithSets,
   updateExerciseOrder,
+  updateSplitTitle,
+  deleteCompletedSession,
 } from '@/app/actions';
 
 // ---------------------------------------------------------------------------
@@ -256,9 +269,16 @@ function AddExerciseModal({
   );
 }
 
+
 // ---------------------------------------------------------------------------
 // Main Workout Page
 // ---------------------------------------------------------------------------
+
+function isFetchError(err: any): boolean {
+  if (!err) return false;
+  const message = typeof err === 'string' ? err : err.message || err.toString() || '';
+  return message.toLowerCase().includes('failed to fetch');
+}
 
 interface WorkoutClientProps {
   splitSlug: string;
@@ -320,8 +340,18 @@ export default function WorkoutClient({
   // Ghost targets
   const [ghostTargets, setGhostTargets] = useState<Record<string, GhostTargetInfo>>({});
 
-  // Session stats
-  const [sessionTonnage, setSessionTonnage] = useState(0);
+  // Dynamic Session Tonnage
+  const sessionTonnage = useMemo(() => {
+    let sum = 0;
+    for (const block of optimisticExerciseBlocks) {
+      for (const s of block.sets) {
+        const w = typeof s.actualWeight === 'number' && s.actualWeight > 0 ? s.actualWeight : s.targetWeight;
+        const r = typeof s.actualReps === 'number' && s.actualReps > 0 ? s.actualReps : s.targetReps;
+        sum += w * r;
+      }
+    }
+    return sum;
+  }, [optimisticExerciseBlocks]);
 
   // Rest timer
   const [restTimer, setRestTimer] = useState<number>(0);
@@ -337,9 +367,69 @@ export default function WorkoutClient({
     source: 'ai' | 'fallback';
   } | null>(null);
   const [targetsSaved, setTargetsSaved] = useState(false);
+  const [isApplyingTargets, startApplyTargetsTransition] = useTransition();
 
   // Add exercise modal
   const [showAddExerciseModal, setShowAddExerciseModal] = useState(false);
+  const [displaySplitTitle, setDisplaySplitTitle] = useState(initialPendingSession?.splitDayName || splitData.name);
+  const [isEditingSplitTitle, setIsEditingSplitTitle] = useState(false);
+  const [splitTitleInput, setSplitTitleInput] = useState(displaySplitTitle);
+  const [isSavingSplitTitle, startSplitTitleTransition] = useTransition();
+
+  const handleSaveSplitTitle = () => {
+    const trimmed = splitTitleInput.trim();
+    if (!trimmed || trimmed === displaySplitTitle) {
+      setIsEditingSplitTitle(false);
+      return;
+    }
+
+    startSplitTitleTransition(async () => {
+      setDisplaySplitTitle(trimmed);
+      setIsEditingSplitTitle(false);
+      try {
+        const res = await updateSplitTitle(displaySplitTitle, trimmed, sessionId);
+        if (res.success) {
+          toast.success(`Routine title updated to "${trimmed}"`);
+          router.refresh();
+        } else {
+          toast.error(res.error || 'Failed to update routine title');
+        }
+      } catch (err: any) {
+        if (isFetchError(err)) {
+          toast.info('Network disconnected: Routine title change saved locally');
+        } else {
+          toast.error('Failed to update routine title');
+        }
+      }
+    });
+  };
+
+  const [, startHistoryDeleteTransition] = useTransition();
+  const handleDeleteHistoricalSession = (targetSessionId: string) => {
+    if (!confirm('Delete this historical session record? Chart will re-index automatically.')) return;
+    startHistoryDeleteTransition(async () => {
+      try {
+        const res = await deleteCompletedSession(targetSessionId);
+        router.refresh();
+        if (res?.success) {
+          setTonnageHistory((prev) => prev.filter((h: any) => h.id !== targetSessionId));
+          toast.success('Historical session deleted & chart re-indexed!');
+        } else {
+          toast.error('Failed to delete session record');
+        }
+      } catch (err: any) {
+        if (isFetchError(err)) {
+          setTonnageHistory((prev) => prev.filter((h: any) => h.id !== targetSessionId));
+          toast.info('Network disconnected: Session record removed locally');
+        } else {
+          toast.error('Failed to delete session record');
+        }
+      }
+    });
+  };
+  const [showImportModal, setShowImportModal] = useState(false);
+  const [importText, setImportText] = useState('');
+  const [isImporting, startImportTransition] = useTransition();
 
   // Rename exercise state
   const [renamingExercise, setRenamingExercise] = useState<string | null>(null);
@@ -415,11 +505,20 @@ export default function WorkoutClient({
               isPersisted: true,
             });
           }
-          const blocks: ExerciseBlock[] = Object.entries(grouped).map(([name, sets]) => ({
-            name,
-            type: 'Compound',
-            sets: sets.sort((a, b) => a.setNumber - b.setNumber),
-          }));
+          const orderMap: Record<string, number> = {};
+          for (const s of pendingSession.sets) {
+            if (orderMap[s.exerciseName] === undefined) {
+              orderMap[s.exerciseName] = s.orderIndex ?? 0;
+            }
+          }
+
+          const blocks: ExerciseBlock[] = Object.entries(grouped)
+            .sort(([nameA], [nameB]) => (orderMap[nameA] ?? 0) - (orderMap[nameB] ?? 0))
+            .map(([name, sets]) => ({
+              name,
+              type: (name.toLowerCase().includes('fly') || name.toLowerCase().includes('curl') || name.toLowerCase().includes('raise') || name.toLowerCase().includes('extension') || name.toLowerCase().includes('lateral')) ? 'Isolation' : 'Compound',
+              sets: sets.sort((a, b) => a.setNumber - b.setNumber),
+            }));
           setExerciseBlocks(blocks);
 
           // Merge ghost targets safely using DB exercise names
@@ -527,14 +626,77 @@ export default function WorkoutClient({
     return () => { isMounted = false; };
   }, [splitData.name, splitData.slug]);
 
-  // Rest timer countdown
+  // Rest timer countdown with Audio beep and vibration
+  const playTimerBeep = () => {
+    try {
+      const AudioCtx = window.AudioContext || (window as any).webkitAudioContext;
+      if (!AudioCtx) return;
+      const ctx = new AudioCtx();
+      const osc = ctx.createOscillator();
+      const gain = ctx.createGain();
+      osc.type = 'sine';
+      osc.frequency.setValueAtTime(880, ctx.currentTime);
+      gain.gain.setValueAtTime(0.3, ctx.currentTime);
+      gain.gain.exponentialRampToValueAtTime(0.00001, ctx.currentTime + 0.4);
+      osc.connect(gain);
+      gain.connect(ctx.destination);
+      osc.start();
+      osc.stop(ctx.currentTime + 0.4);
+    } catch {
+      // ignore browser audio context blocks
+    }
+  };
+
   useEffect(() => {
     if (restTimer <= 0) return;
     const interval = setInterval(() => {
-      setRestTimer((prev) => { if (prev <= 1) { clearInterval(interval); return 0; } return prev - 1; });
+      setRestTimer((prev) => {
+        if (prev <= 1) {
+          clearInterval(interval);
+          playTimerBeep();
+          if (typeof window !== 'undefined' && navigator.vibrate) {
+            navigator.vibrate([200, 100, 200]);
+          }
+          return 0;
+        }
+        return prev - 1;
+      });
     }, 1000);
     return () => clearInterval(interval);
   }, [restTimer]);
+
+  // Offline Sync Queue reconnect listener
+  useEffect(() => {
+    const syncOfflineQueue = async () => {
+      try {
+        const initialQueue = await getOfflineMutations();
+        if (!initialQueue || initialQueue.length === 0) return;
+        toast.info(`Back online: Syncing ${initialQueue.length} offline change(s) to database...`);
+        const count = await processOfflineQueue(async (item) => {
+          if (item.type === 'UPDATE_SET' && item.payload?.setId) {
+            await updateWorkoutSet(item.payload.setId, item.payload.data);
+          } else if (item.type === 'DELETE_SET' && item.payload?.setId) {
+            await deleteWorkoutSet(item.payload.setId);
+          } else if (item.type === 'ADD_SET' && item.payload?.sessionId) {
+            await addSetToExercise(item.payload.sessionId, item.payload.exerciseName, item.payload.weight, item.payload.reps);
+          } else if (item.type === 'ADD_EXERCISE' && item.payload?.splitName) {
+            await addExerciseToSession(item.payload.splitName, { name: item.payload.name, type: item.payload.type, sets: item.payload.sets });
+          } else if (item.type === 'DELETE_EXERCISE' && item.payload?.sessionId) {
+            await deleteExerciseFromSession(item.payload.sessionId, item.payload.exerciseName);
+          }
+        });
+        if (count > 0) {
+          router.refresh();
+          toast.success(`${count} offline mutation(s) synced to cloud!`);
+        }
+      } catch (err) {
+        console.warn('[Offline Sync] Error syncing queue:', err);
+      }
+    };
+
+    window.addEventListener('online', syncOfflineQueue);
+    return () => window.removeEventListener('online', syncOfflineQueue);
+  }, [router]);
 
   const formatTimer = (seconds: number) => {
     const mins = Math.floor(seconds / 60);
@@ -563,11 +725,26 @@ export default function WorkoutClient({
     const set = block?.sets.find((s) => s.id === setId);
     if (set?.dbId) {
       startSetTransition(async () => {
-        const res = await updateWorkoutSet(set.dbId!, { isDropSet: nextDropState }); router.refresh();
-        if (res.success) {
-          toast.success(nextDropState ? 'Marked as Drop Set' : 'Drop set unmarked');
-        } else {
-          toast.error('Failed to update drop set status in DB');
+        if (typeof window !== 'undefined' && !navigator.onLine) {
+          await enqueueOfflineMutation('UPDATE_SET', { setId: set.dbId, data: { isDropSet: nextDropState } });
+          toast.info('Offline mode: Saved locally in IndexedDB');
+          return;
+        }
+        try {
+          const res = await updateWorkoutSet(set.dbId!, { isDropSet: nextDropState });
+          router.refresh();
+          if (res.success) {
+            toast.success(nextDropState ? 'Marked as Drop Set' : 'Drop set unmarked');
+          } else {
+            toast.error('Failed to update drop set status in DB');
+          }
+        } catch (err: any) {
+          if (isFetchError(err)) {
+            await enqueueOfflineMutation('UPDATE_SET', { setId: set.dbId!, data: { isDropSet: nextDropState } });
+            toast.info('Network disconnected: Saved locally in IndexedDB');
+          } else {
+            toast.error('Failed to update drop set status in DB');
+          }
         }
       });
     } else {
@@ -579,27 +756,42 @@ export default function WorkoutClient({
   // SET — toggle complete
   // -------------------------------------------------------------------------
   const handleToggleSet = useCallback((exName: string, setId: string, weight: number, reps: number) => {
+    const targetBlock = exerciseBlocks.find((e) => e.name === exName);
+    const restSeconds = targetBlock?.type === 'Compound' ? 180 : 90;
+
     setExerciseBlocks((prev) => prev.map((ex) => {
       if (ex.name !== exName) return ex;
       return {
         ...ex, sets: ex.sets.map((s) => {
           if (s.id !== setId) return s;
           const next = !s.isCompleted;
-          const w = typeof s.actualWeight === 'number' ? s.actualWeight : weight;
-          const r = typeof s.actualReps === 'number' ? s.actualReps : reps;
-          if (next) { setSessionTonnage((t) => t + w * r); setRestTimer(90); setActiveRestExercise(ex.name); }
-          else { setSessionTonnage((t) => Math.max(0, t - w * r)); }
+          if (next) { setRestTimer(restSeconds); setActiveRestExercise(ex.name); }
           return { ...s, isCompleted: next };
         }),
       };
     }));
 
-    // Persist to DB if set has a dbId
     startSetTransition(async () => {
       const block = exerciseBlocks.find((e) => e.name === exName);
       const set = block?.sets.find((s) => s.id === setId);
       if (set?.dbId) {
-        await updateWorkoutSet(set.dbId, { isCompleted: !set.isCompleted }); router.refresh();
+        const nextState = !set.isCompleted;
+        if (typeof window !== 'undefined' && !navigator.onLine) {
+          await enqueueOfflineMutation('UPDATE_SET', { setId: set.dbId, data: { isCompleted: nextState } });
+          toast.info('Offline mode: Set completion queued in IndexedDB');
+          return;
+        }
+        try {
+          await updateWorkoutSet(set.dbId, { isCompleted: nextState });
+          router.refresh();
+        } catch (err: any) {
+          if (isFetchError(err)) {
+            await enqueueOfflineMutation('UPDATE_SET', { setId: set.dbId, data: { isCompleted: nextState } });
+            toast.info('Network disconnected: Set completion queued in IndexedDB');
+          } else {
+            toast.error('Failed to update set status');
+          }
+        }
       }
     });
   }, [exerciseBlocks]);
@@ -627,14 +819,32 @@ export default function WorkoutClient({
     if (!set || !set.dbId) return;
 
     startSetTransition(async () => {
-      const res = await updateWorkoutSet(set.dbId!, {
+      const dataPayload = {
         targetWeight: typeof set.targetWeight === 'number' ? set.targetWeight : undefined,
         targetReps: typeof set.targetReps === 'number' ? set.targetReps : undefined,
         actualWeight: typeof set.actualWeight === 'number' ? set.actualWeight : undefined,
         actualReps: typeof set.actualReps === 'number' ? set.actualReps : undefined,
-      }); router.refresh();
-      if (!res.success) {
-        toast.error('Failed to save set changes');
+      };
+
+      if (typeof window !== 'undefined' && !navigator.onLine) {
+        await enqueueOfflineMutation('UPDATE_SET', { setId: set.dbId, data: dataPayload });
+        toast.info('Offline mode: Saved locally in IndexedDB');
+        return;
+      }
+
+      try {
+        const res = await updateWorkoutSet(set.dbId!, dataPayload);
+        router.refresh();
+        if (!res.success) {
+          toast.error('Failed to save set changes');
+        }
+      } catch (err: any) {
+        if (isFetchError(err)) {
+          await enqueueOfflineMutation('UPDATE_SET', { setId: set.dbId!, data: dataPayload });
+          toast.info('Network disconnected: Saved locally in IndexedDB');
+        } else {
+          toast.error('Failed to save set changes');
+        }
       }
     });
   }, [exerciseBlocks]);
@@ -672,21 +882,38 @@ export default function WorkoutClient({
       const last = block?.sets[block.sets.length - 1];
       const w = typeof last?.actualWeight === 'number' ? last.actualWeight : 20;
       const r = typeof last?.actualReps === 'number' ? last.actualReps : 10;
-      const res = await addSetToExercise(sessionId, exName, w, r); router.refresh();
-      if (res.success && res.set) {
-        // Replace local id with real DB id
-        setExerciseBlocks((prev) => prev.map((ex) => {
-          if (ex.name !== exName) return ex;
-          const sets = [...ex.sets];
-          const localIdx = sets.findLastIndex((s) => !s.dbId);
-          if (localIdx !== -1 && res.set) {
-            sets[localIdx] = { ...sets[localIdx], id: res.set.id, dbId: res.set.id, isPersisted: true };
-          }
-          return { ...ex, sets };
-        }));
-        toast.success('Set added!');
-      } else {
-        toast.error('Failed to save new set to DB');
+
+      if (typeof window !== 'undefined' && !navigator.onLine) {
+        await enqueueOfflineMutation('ADD_SET', { sessionId, exerciseName: exName, weight: w, reps: r });
+        toast.info('Offline mode: Set addition queued in IndexedDB');
+        return;
+      }
+
+      try {
+        const res = await addSetToExercise(sessionId, exName, w, r);
+        router.refresh();
+        if (res.success && res.set) {
+          // Replace local id with real DB id
+          setExerciseBlocks((prev) => prev.map((ex) => {
+            if (ex.name !== exName) return ex;
+            const sets = [...ex.sets];
+            const localIdx = sets.findLastIndex((s) => !s.dbId);
+            if (localIdx !== -1 && res.set) {
+              sets[localIdx] = { ...sets[localIdx], id: res.set.id, dbId: res.set.id, isPersisted: true };
+            }
+            return { ...ex, sets };
+          }));
+          toast.success('Set added!');
+        } else {
+          toast.error('Failed to save new set to DB');
+        }
+      } catch (err: any) {
+        if (isFetchError(err)) {
+          await enqueueOfflineMutation('ADD_SET', { sessionId, exerciseName: exName, weight: w, reps: r });
+          toast.info('Network disconnected: Set addition queued in IndexedDB');
+        } else {
+          toast.error('Failed to save new set to DB');
+        }
       }
     });
   }, [exerciseBlocks, sessionId]);
@@ -709,9 +936,25 @@ export default function WorkoutClient({
 
     if (set?.dbId) {
       startSetTransition(async () => {
-        const res = await deleteWorkoutSet(set.dbId!); router.refresh();
-        if (!res.success) toast.error('Failed to delete set from DB');
-        else toast.success('Set removed');
+        if (typeof window !== 'undefined' && !navigator.onLine) {
+          await enqueueOfflineMutation('DELETE_SET', { setId: set.dbId });
+          toast.info('Offline mode: Set deletion queued in IndexedDB');
+          return;
+        }
+
+        try {
+          const res = await deleteWorkoutSet(set.dbId!);
+          router.refresh();
+          if (!res.success) toast.error('Failed to delete set from DB');
+          else toast.success('Set removed');
+        } catch (err: any) {
+          if (isFetchError(err)) {
+            await enqueueOfflineMutation('DELETE_SET', { setId: set.dbId! });
+            toast.info('Network disconnected: Set deletion queued in IndexedDB');
+          } else {
+            toast.error('Failed to delete set from DB');
+          }
+        }
       });
     }
   }, [exerciseBlocks]);
@@ -732,11 +975,20 @@ export default function WorkoutClient({
     if (sessionId) {
       startSetTransition(async () => {
         const orders = newBlocks.map((b, idx) => ({ exerciseName: b.name, orderIndex: idx }));
-        const res = await updateExerciseOrder(sessionId, orders); router.refresh();
-        if (res.success) {
-          toast.success('Exercise layout saved!');
-        } else {
-          toast.error('Failed to save exercise order');
+        try {
+          const res = await updateExerciseOrder(sessionId, orders);
+          router.refresh();
+          if (res.success) {
+            toast.success('Exercise layout saved!');
+          } else {
+            toast.error('Failed to save exercise order');
+          }
+        } catch (err: any) {
+          if (isFetchError(err)) {
+            toast.info('Network disconnected: Layout saved locally');
+          } else {
+            toast.error('Failed to save exercise order');
+          }
         }
       });
     }
@@ -758,9 +1010,25 @@ export default function WorkoutClient({
     const set = block?.sets.find((s) => s.id === setId);
     if (set?.dbId) {
       startSetTransition(async () => {
-        const res = await updateWorkoutSet(set.dbId!, { rpe: newRpe }); router.refresh();
-        if (res.success) {
-          toast.success(`Set RPE updated to ${newRpe}`);
+        if (typeof window !== 'undefined' && !navigator.onLine) {
+          await enqueueOfflineMutation('UPDATE_SET', { setId: set.dbId, data: { rpe: newRpe } });
+          toast.info('Offline mode: RPE updated locally');
+          return;
+        }
+
+        try {
+          const res = await updateWorkoutSet(set.dbId!, { rpe: newRpe });
+          router.refresh();
+          if (res.success) {
+            toast.success(`Set RPE updated to ${newRpe}`);
+          }
+        } catch (err: any) {
+          if (isFetchError(err)) {
+            await enqueueOfflineMutation('UPDATE_SET', { setId: set.dbId!, data: { rpe: newRpe } });
+            toast.info('Network disconnected: RPE updated locally');
+          } else {
+            toast.error('Failed to update RPE in DB');
+          }
         }
       });
     }
@@ -793,17 +1061,32 @@ export default function WorkoutClient({
       );
 
       if (sessionId) {
-        const res = await renameExerciseInSession(sessionId, oldName, newName); router.refresh();
-        if (res.success) {
-          toast.success(`Renamed to "${newName}"`);
-        } else {
-          setExerciseBlocks((prev) =>
-            prev.map((ex) => {
-              if (ex.name !== newName) return ex;
-              return { ...ex, name: oldName, sets: ex.sets.map((s) => ({ ...s, exerciseName: oldName })) };
-            })
-          );
-          toast.error('Failed to rename exercise in database');
+        try {
+          const res = await renameExerciseInSession(sessionId, oldName, newName);
+          router.refresh();
+          if (res.success) {
+            toast.success(`Renamed to "${newName}"`);
+          } else {
+            setExerciseBlocks((prev) =>
+              prev.map((ex) => {
+                if (ex.name !== newName) return ex;
+                return { ...ex, name: oldName, sets: ex.sets.map((s) => ({ ...s, exerciseName: oldName })) };
+              })
+            );
+            toast.error('Failed to rename exercise in database');
+          }
+        } catch (err: any) {
+          if (isFetchError(err)) {
+            toast.info('Network disconnected: Renamed locally');
+          } else {
+            setExerciseBlocks((prev) =>
+              prev.map((ex) => {
+                if (ex.name !== newName) return ex;
+                return { ...ex, name: oldName, sets: ex.sets.map((s) => ({ ...s, exerciseName: oldName })) };
+              })
+            );
+            toast.error('Failed to rename exercise in database');
+          }
         }
       } else {
         toast.success(`Renamed to "${newName}"`);
@@ -823,12 +1106,29 @@ export default function WorkoutClient({
       setExerciseBlocks((prev) => prev.filter((e) => e.name !== exName));
 
       if (sessionId) {
-        const res = await deleteExerciseFromSession(sessionId, exName); router.refresh();
-        if (res.success) {
-          toast.success(`"${exName}" removed`);
-        } else {
-          if (removedBlock) setExerciseBlocks((prev) => [...prev, removedBlock]);
-          toast.error('Failed to delete exercise');
+        if (typeof window !== 'undefined' && !navigator.onLine) {
+          await enqueueOfflineMutation('DELETE_EXERCISE', { sessionId, exerciseName: exName });
+          toast.info('Offline mode: Exercise deletion queued in IndexedDB');
+          return;
+        }
+
+        try {
+          const res = await deleteExerciseFromSession(sessionId, exName);
+          router.refresh();
+          if (res.success) {
+            toast.success(`"${exName}" removed`);
+          } else {
+            if (removedBlock) setExerciseBlocks((prev) => [...prev, removedBlock]);
+            toast.error('Failed to delete exercise');
+          }
+        } catch (err: any) {
+          if (isFetchError(err)) {
+            await enqueueOfflineMutation('DELETE_EXERCISE', { sessionId, exerciseName: exName });
+            toast.info('Network disconnected: Exercise deletion queued in IndexedDB');
+          } else {
+            if (removedBlock) setExerciseBlocks((prev) => [...prev, removedBlock]);
+            toast.error('Failed to delete exercise');
+          }
         }
       } else {
         toast.success(`"${exName}" removed`);
@@ -866,26 +1166,42 @@ export default function WorkoutClient({
       dispatchOptimisticExerciseBlocks({ type: 'add', block: newBlock });
       setExerciseBlocks((prev) => [...prev, newBlock]);
 
-      const res = await addExerciseToSession(splitData.name, { name, type, sets }); router.refresh();
-      if (res.success) {
-        if (res.sessionId) setSessionId(res.sessionId);
-        if (res.sets) {
-          setExerciseBlocks((prev) =>
-            prev.map((ex) => {
-              if (ex.name !== name) return ex;
-              return {
-                ...ex,
-                sets: ex.sets.map((s, idx) => {
-                  const dbSet = res.sets?.[idx];
-                  return dbSet ? { ...s, id: dbSet.id, dbId: dbSet.id, isPersisted: true } : s;
-                }),
-              };
-            })
-          );
+      if (typeof window !== 'undefined' && !navigator.onLine) {
+        await enqueueOfflineMutation('ADD_EXERCISE', { splitName: splitData.name, name, type, sets });
+        toast.info('Offline mode: Custom exercise queued in IndexedDB');
+        return;
+      }
+
+      try {
+        const res = await addExerciseToSession(splitData.name, { name, type, sets });
+        router.refresh();
+        if (res.success) {
+          if (res.sessionId) setSessionId(res.sessionId);
+          if (res.sets) {
+            setExerciseBlocks((prev) =>
+              prev.map((ex) => {
+                if (ex.name !== name) return ex;
+                return {
+                  ...ex,
+                  sets: ex.sets.map((s, idx) => {
+                    const dbSet = res.sets?.[idx];
+                    return dbSet ? { ...s, id: dbSet.id, dbId: dbSet.id, isPersisted: true } : s;
+                  }),
+                };
+              })
+            );
+          }
+          toast.success(`"${name}" added!`);
+        } else {
+          toast.error('Exercise added locally — could not persist to DB');
         }
-        toast.success(`"${name}" added!`);
-      } else {
-        toast.error('Exercise added locally — could not persist to DB');
+      } catch (err: any) {
+        if (isFetchError(err)) {
+          await enqueueOfflineMutation('ADD_EXERCISE', { splitName: splitData.name, name, type, sets });
+          toast.info('Network disconnected: Custom exercise queued in IndexedDB');
+        } else {
+          toast.error('Exercise added locally — could not persist to DB');
+        }
       }
     });
   }, [splitData.name, dispatchOptimisticExerciseBlocks]);
@@ -914,7 +1230,8 @@ export default function WorkoutClient({
             rpe: s.rpe ?? 7,
           })),
         };
-        const result = await analyzeSessionProgression(payload); router.refresh();
+        const result = await analyzeSessionProgression(payload);
+        router.refresh();
         if (result.source === 'fallback') {
           toast.warning('AI check-in unavailable', { description: 'Using rule-based progressive overload targets.' });
         }
@@ -922,32 +1239,106 @@ export default function WorkoutClient({
         setShowAiModal(true);
         setTargetsSaved(false);
         confetti({ particleCount: 120, spread: 80, origin: { y: 0.55 }, colors: ['#06b6d4', '#10b981', '#a855f7', '#38bdf8'] });
-      } catch (err) {
+      } catch (err: any) {
         console.error('Failed to analyze session:', err);
-        toast.error('AI progression engine unavailable');
+        if (isFetchError(err)) {
+          toast.warning('Network disconnected: Using offline progression fallback');
+          const fallbackRecommendations: AIProgressionTarget[] = toAnalyze.map((s) => {
+            const actW = typeof s.actualWeight === 'number' ? s.actualWeight : s.targetWeight;
+            const actR = typeof s.actualReps === 'number' ? s.actualReps : s.targetReps;
+            const shouldIncrement = actR >= s.targetReps;
+            return {
+              exercise: s.exerciseName,
+              nextWeight: shouldIncrement ? actW + 2.5 : actW,
+              nextReps: s.targetReps,
+              reason: shouldIncrement ? 'Offline Progressive Overload: Target met, +2.5kg.' : 'Offline Maintenance: Hold weight until target reps achieved.',
+            };
+          });
+          const result = {
+            analysis: 'Network disconnected. Rule-based progressive overload active.',
+            recommendations: fallbackRecommendations,
+            totalTonnage: sessionTonnage,
+            source: 'fallback' as const,
+          };
+          setAiVerdict(result);
+          setShowAiModal(true);
+          setTargetsSaved(false);
+        } else {
+          toast.error('AI progression engine unavailable');
+        }
       }
     });
   };
 
-  // Apply AI targets
+  // Apply AI targets & archive completed session
   const handleApplyAITargets = () => {
     if (!aiVerdict) return;
-    const updatedGhosts: Record<string, GhostTargetInfo> = { ...ghostTargets };
-    aiVerdict.recommendations.forEach((rec) => {
-      const prev = updatedGhosts[rec.exercise];
-      updatedGhosts[rec.exercise] = {
-        targetWeight: rec.nextWeight,
-        targetReps: rec.nextReps,
-        ghostWeight: prev ? prev.ghostWeight : rec.nextWeight,
-        ghostReps: prev ? prev.ghostReps : rec.nextReps,
-      };
+
+    if (!sessionId) {
+      toast.warning('No active session ID — saving targets to local ghost cache.');
+      const updatedGhosts: Record<string, GhostTargetInfo> = { ...ghostTargets };
+      aiVerdict.recommendations.forEach((rec) => {
+        const prev = updatedGhosts[rec.exercise];
+        updatedGhosts[rec.exercise] = {
+          targetWeight: rec.nextWeight,
+          targetReps: rec.nextReps,
+          ghostWeight: prev ? prev.ghostWeight : rec.nextWeight,
+          ghostReps: prev ? prev.ghostReps : rec.nextReps,
+        };
+      });
+      setGhostTargets(updatedGhosts);
+      saveCachedGhosts(splitData.slug, updatedGhosts);
+      setTargetsSaved(true);
+      toast.success('Targets saved!', { description: `Next session targets cached for ${splitData.name}.` });
+      confetti({ particleCount: 80, spread: 60, origin: { y: 0.6 }, colors: ['#10b981', '#06b6d4'] });
+      setTimeout(() => setShowAiModal(false), 1200);
+      return;
+    }
+
+    startApplyTargetsTransition(async () => {
+      try {
+        const targets = aiVerdict.recommendations.map((rec) => ({
+          exercise: rec.exercise,
+          nextWeight: rec.nextWeight,
+          nextReps: rec.nextReps,
+        }));
+
+        const res = await applyProgressionAndCompleteSession(sessionId, targets);
+
+        if (res.success) {
+          const updatedGhosts: Record<string, GhostTargetInfo> = { ...ghostTargets };
+          aiVerdict.recommendations.forEach((rec) => {
+            const prev = updatedGhosts[rec.exercise];
+            updatedGhosts[rec.exercise] = {
+              targetWeight: rec.nextWeight,
+              targetReps: rec.nextReps,
+              ghostWeight: prev ? prev.ghostWeight : rec.nextWeight,
+              ghostReps: prev ? prev.ghostReps : rec.nextReps,
+            };
+          });
+          setGhostTargets(updatedGhosts);
+          saveCachedGhosts(splitData.slug, updatedGhosts);
+          setTargetsSaved(true);
+          toast.success('Session saved & next targets applied!', {
+            description: `Tonnage archived. New session initialized with AI targets.`,
+          });
+          confetti({ particleCount: 80, spread: 60, origin: { y: 0.6 }, colors: ['#10b981', '#06b6d4'] });
+          setTimeout(() => {
+            setShowAiModal(false);
+            router.refresh();
+          }, 600);
+        } else {
+          toast.error(res.error || 'Failed to complete session.');
+        }
+      } catch (err: any) {
+        if (isFetchError(err)) {
+          toast.info('Network disconnected: Session saved locally.');
+          setShowAiModal(false);
+        } else {
+          toast.error('Failed to complete session.');
+        }
+      }
     });
-    setGhostTargets(updatedGhosts);
-    saveCachedGhosts(splitData.slug, updatedGhosts);
-    setTargetsSaved(true);
-    toast.success('Targets saved!', { description: `Next session targets cached for ${splitData.name}.` });
-    confetti({ particleCount: 80, spread: 60, origin: { y: 0.6 }, colors: ['#10b981', '#06b6d4'] });
-    setTimeout(() => setShowAiModal(false), 1800);
   };
 
   // Chart calcs
@@ -958,8 +1349,41 @@ export default function WorkoutClient({
   const progressionDeltaPercent = Math.round(((lastTonnage - firstTonnage) / firstTonnage) * 100);
   const completedSetsTotal = exerciseBlocks.flatMap((e) => e.sets).filter((s) => s.isCompleted).length;
 
+  const handleRunImport = () => {
+    if (!importText.trim()) {
+      toast.error('Please enter or upload workout text.');
+      return;
+    }
+
+    startImportTransition(async () => {
+      try {
+        const res = await parseAndImportWorkout(importText.trim(), splitData.name, sessionId);
+        if (res.success) {
+          setShowImportModal(false);
+          setImportText('');
+          if (res.blocks) {
+            setExerciseBlocks(res.blocks);
+            dispatchOptimisticExerciseBlocks({ type: 'set', blocks: res.blocks });
+          }
+          toast.success(`Imported ${res.exercisesCount} exercises (${res.count} sets)!`);
+          router.refresh();
+        } else {
+          toast.error(res.error || 'Failed to import workout.');
+        }
+      } catch (err: any) {
+        if (isFetchError(err)) {
+          toast.error('Network disconnected: Cannot run AI import while offline');
+        } else {
+          toast.error('Failed to parse workout file.');
+        }
+      }
+    });
+  };
+
   return (
-    <div className="space-y-6 animate-in fade-in duration-300">
+    <div className="min-h-screen bg-[#040812] text-slate-100 font-sans pb-24 selection:bg-cyan-500 selection:text-black">
+      <AppHeader />
+      <main className="max-w-6xl mx-auto px-4 pt-6 space-y-6 animate-in fade-in duration-300">
       {/* Split Header */}
       <div className="relative overflow-hidden rounded-3xl bg-slate-900/40 backdrop-blur-xl border border-white/5 p-6 shadow-2xl">
         <div className="absolute top-0 right-0 w-64 h-64 bg-cyan-500/10 rounded-full blur-3xl pointer-events-none -mr-16 -mt-16" />
@@ -969,7 +1393,46 @@ export default function WorkoutClient({
               <span className="w-2 h-2 rounded-full bg-cyan-400 animate-ping" />
               <span className="text-xs font-bold uppercase tracking-wider text-cyan-400">Active Routine Segment</span>
             </div>
-            <h1 className="text-2xl sm:text-3xl font-black text-white tracking-tight">{splitData.name}</h1>
+            {isEditingSplitTitle ? (
+              <div className="flex items-center gap-2 mt-1">
+                <input
+                  type="text"
+                  autoFocus
+                  value={splitTitleInput}
+                  onChange={(e) => setSplitTitleInput(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter') handleSaveSplitTitle();
+                    if (e.key === 'Escape') setIsEditingSplitTitle(false);
+                  }}
+                  className="bg-slate-950 border border-cyan-500 rounded-xl px-3 py-1.5 text-xl font-black text-white outline-none focus:ring-2 focus:ring-cyan-500/50"
+                />
+                <button
+                  onClick={handleSaveSplitTitle}
+                  disabled={isSavingSplitTitle}
+                  className="px-3 py-1.5 rounded-xl bg-cyan-500 text-slate-950 font-bold text-xs hover:bg-cyan-400 transition-all"
+                >
+                  Save
+                </button>
+                <button
+                  onClick={() => setIsEditingSplitTitle(false)}
+                  className="px-3 py-1.5 rounded-xl bg-slate-800 text-slate-300 font-bold text-xs hover:bg-slate-700 transition-all"
+                >
+                  Cancel
+                </button>
+              </div>
+            ) : (
+              <div className="flex items-center gap-2 group cursor-pointer" onClick={() => { setSplitTitleInput(displaySplitTitle); setIsEditingSplitTitle(true); }}>
+                <h1 className="text-2xl sm:text-3xl font-black text-white tracking-tight group-hover:text-cyan-300 transition-colors">
+                  {displaySplitTitle}
+                </h1>
+                <button
+                  className="p-1 rounded-lg bg-slate-800/80 text-slate-400 group-hover:text-cyan-400 group-hover:bg-cyan-500/10 transition-all"
+                  title="Edit routine title"
+                >
+                  <Pencil size={14} />
+                </button>
+              </div>
+            )}
             <p className="text-xs sm:text-sm text-slate-400 mt-1 font-medium">
               {splitData.subtitle} · <span className="text-slate-300">{splitData.focus}</span>
             </p>
@@ -1043,8 +1506,23 @@ export default function WorkoutClient({
                         <div style={{ height: `${normalizedHeight}%` }}
                           className={`w-full rounded-xl transition-all duration-700 ease-out ${isLatest ? 'bg-gradient-to-t from-cyan-500 via-teal-400 to-emerald-400 shadow-[0_0_20px_rgba(6,182,212,0.4)]' : 'bg-gradient-to-t from-slate-800 to-slate-700 group-hover:from-cyan-900 group-hover:to-cyan-600'}`} />
                       </div>
-                      <div className="mt-2 text-center">
-                        <span className={`text-xs font-bold ${isLatest ? 'text-cyan-400' : 'text-slate-400'}`}>{item.weekLabel}</span>
+                      <div className="mt-2 text-center flex flex-col items-center">
+                        <div className="flex items-center gap-1">
+                          <span className={`text-xs font-bold ${isLatest ? 'text-cyan-400' : 'text-slate-400'}`}>{item.weekLabel}</span>
+                          {(item as any).id && (
+                            <button
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                handleDeleteHistoricalSession((item as any).id);
+                              }}
+                              className="opacity-0 group-hover:opacity-100 p-1 rounded bg-slate-800 text-slate-400 hover:text-red-400 hover:bg-red-500/20 transition-all"
+                              title="Delete historical session"
+                              aria-label={`Delete ${item.weekLabel}`}
+                            >
+                              <Trash2 size={11} />
+                            </button>
+                          )}
+                        </div>
                         <span className="text-[10px] text-slate-500 block">{item.date}</span>
                       </div>
                     </div>
@@ -1069,6 +1547,12 @@ export default function WorkoutClient({
           </div>
           <div className="flex items-center gap-2">
             <span className="text-xs text-slate-400">{optimisticExerciseBlocks.length} Exercises</span>
+            <button
+              onClick={() => setShowImportModal(true)}
+              className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-purple-500/10 text-purple-400 border border-purple-500/20 text-xs font-bold hover:bg-purple-500 hover:text-white transition-all shadow-[0_0_15px_rgba(168,85,247,0.15)]"
+            >
+              <Sparkles size={14} />Smart Import (.txt)
+            </button>
             <button
               onClick={() => setShowAddExerciseModal(true)}
               className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-cyan-500/10 text-cyan-400 border border-cyan-500/20 text-xs font-bold hover:bg-cyan-500 hover:text-slate-950 transition-all"
@@ -1325,6 +1809,93 @@ export default function WorkoutClient({
         />
       )}
 
+      {/* Smart Import Modal */}
+      {showImportModal && (
+        <div className="fixed inset-0 bg-black/85 backdrop-blur-sm z-50 flex items-center justify-center p-4 animate-in fade-in duration-200">
+          <div className="bg-[#0a1120] border border-slate-800 rounded-3xl p-6 w-full max-w-lg space-y-5 shadow-2xl animate-in zoom-in-95 duration-200">
+            <div className="flex justify-between items-center">
+              <div className="flex items-center gap-2">
+                <div className="w-8 h-8 rounded-xl bg-purple-500/20 text-purple-400 flex items-center justify-center border border-purple-500/30">
+                  <Sparkles size={16} />
+                </div>
+                <div>
+                  <h3 className="text-base font-bold text-white">Smart AI Workout Import</h3>
+                  <p className="text-xs text-slate-400">Upload a .txt file or paste unstructured workout notes</p>
+                </div>
+              </div>
+              <button
+                onClick={() => { setShowImportModal(false); setImportText(''); }}
+                className="w-8 h-8 rounded-full bg-slate-800 text-slate-400 flex items-center justify-center hover:text-white"
+              >
+                <X size={16} />
+              </button>
+            </div>
+
+            <div className="space-y-3">
+              <div>
+                <label className="text-xs font-semibold text-slate-300 block mb-1">
+                  Upload Workout File (.txt)
+                </label>
+                <input
+                  type="file"
+                  accept=".txt"
+                  onChange={(e) => {
+                    const file = e.target.files?.[0];
+                    if (file) {
+                      const reader = new FileReader();
+                      reader.onload = (event) => {
+                        const text = event.target?.result;
+                        if (typeof text === 'string') {
+                          setImportText(text);
+                          toast.success(`Loaded file: ${file.name}`);
+                        }
+                      };
+                      reader.readAsText(file);
+                    }
+                  }}
+                  className="w-full text-xs text-slate-400 file:mr-3 file:py-2 file:px-4 file:rounded-xl file:border-0 file:text-xs file:font-bold file:bg-purple-500/20 file:text-purple-300 hover:file:bg-purple-500/30 bg-slate-950 border border-slate-800 rounded-xl cursor-pointer"
+                />
+              </div>
+
+              <div className="relative flex items-center justify-center my-2">
+                <div className="border-t border-slate-800 w-full" />
+                <span className="bg-[#0a1120] px-3 text-[10px] uppercase font-bold text-slate-500 absolute">OR PASTE TEXT</span>
+              </div>
+
+              <div>
+                <label className="text-xs font-semibold text-slate-300 block mb-1">
+                  Workout Raw Notes
+                </label>
+                <textarea
+                  rows={5}
+                  value={importText}
+                  onChange={(e) => setImportText(e.target.value)}
+                  placeholder={`e.g.\nFlat Bench Press: 25kg x 7 reps, 27.5kg x 3 reps (drop set)\nIncline Dumbbell Fly: 15kg x 10 reps, 15kg x 8 reps`}
+                  className="w-full bg-slate-950 border border-slate-800 rounded-xl p-3 text-xs font-mono text-slate-200 focus:border-purple-500 outline-none resize-none"
+                />
+              </div>
+            </div>
+
+            <div className="flex gap-3 justify-end pt-2">
+              <button
+                onClick={() => { setShowImportModal(false); setImportText(''); }}
+                className="px-4 py-2.5 rounded-xl bg-slate-800 text-slate-300 text-xs font-bold hover:bg-slate-700 transition-all"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={handleRunImport}
+                disabled={isImporting || !importText.trim()}
+                className="px-5 py-2.5 rounded-xl bg-gradient-to-r from-purple-600 to-indigo-600 text-white font-bold text-xs flex items-center gap-2 shadow-[0_0_20px_rgba(168,85,247,0.3)] hover:opacity-90 transition-all disabled:opacity-50"
+              >
+                {isImporting ? <Loader2 size={16} className="animate-spin" /> : <Sparkles size={16} />}
+                Parse &amp; Import Workout
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* AI Verdict Modal */}
       {showAiModal && aiVerdict && (
         <div className="fixed inset-0 z-50 bg-black/80 backdrop-blur-xl flex items-center justify-center p-4 animate-in fade-in duration-200">
@@ -1359,6 +1930,17 @@ export default function WorkoutClient({
               </div>
             </div>
 
+            {(aiVerdict as any).isDeloadRecommended && (
+              <div className="p-4 bg-amber-500/10 border border-amber-500/30 rounded-2xl space-y-1">
+                <div className="flex items-center gap-2 text-xs font-black uppercase tracking-wider text-amber-400">
+                  <AlertTriangle size={15} /> Deload Week Recommended
+                </div>
+                <p className="text-xs text-amber-200/90 leading-relaxed font-medium">
+                  {(aiVerdict as any).deloadReason || 'High accumulated fatigue detected. Recommend a 1-week deload at 80% load to allow CNS recovery.'}
+                </p>
+              </div>
+            )}
+
             {aiVerdict.analysis && (
               <div className="p-4 bg-indigo-950/60 border border-indigo-500/30 rounded-2xl space-y-1">
                 <span className="text-[10px] text-indigo-400 font-bold uppercase tracking-wider block">
@@ -1371,34 +1953,83 @@ export default function WorkoutClient({
             )}
 
             <div className="space-y-3">
-              <h4 className="text-xs font-black text-slate-400 uppercase tracking-wider">Tailored Prescription &amp; Reasons</h4>
+              <h4 className="text-xs font-black text-slate-400 uppercase tracking-wider">Recommended Progression Updates</h4>
               {aiVerdict.recommendations.map((rec, index) => (
                 <div key={index} className="bg-slate-950/60 border border-cyan-500/20 rounded-2xl p-4 space-y-2 shadow-lg hover:border-cyan-500/40 transition-colors">
                   <div className="flex items-center justify-between">
                     <span className="font-bold text-white text-sm">{rec.exercise}</span>
                     <span className="text-xs font-extrabold text-cyan-300 font-mono bg-cyan-500/10 px-2.5 py-1 rounded-lg border border-cyan-500/30">
-                      Next: {rec.nextWeight}kg × {rec.nextReps} reps
+                      Target: {rec.nextWeight}kg × {rec.nextReps} reps
                     </span>
                   </div>
-                  <p className="text-xs text-slate-300 leading-relaxed font-medium bg-slate-900/60 p-2.5 rounded-xl border border-white/5">"{rec.reason}"</p>
+                  <p className="text-xs text-slate-300 leading-relaxed font-medium bg-slate-900/60 p-2.5 rounded-xl border border-white/5">&quot;{rec.reason}&quot;</p>
                 </div>
               ))}
             </div>
 
             <div className="pt-2">
               {!targetsSaved ? (
-                <button onClick={handleApplyAITargets} className="w-full py-3.5 rounded-2xl bg-gradient-to-r from-cyan-500 via-teal-400 to-emerald-500 text-slate-950 font-black text-sm shadow-[0_0_24px_rgba(6,182,212,0.4)] hover:opacity-95 active:scale-98 transition-all flex items-center justify-center gap-2">
-                  <Award size={18} /><span>Apply &amp; Save Targets as Ghost Data</span>
+                <button
+                  onClick={handleApplyAITargets}
+                  disabled={isApplyingTargets}
+                  className="w-full py-3.5 rounded-2xl bg-gradient-to-r from-cyan-500 via-teal-400 to-emerald-500 text-slate-950 font-black text-sm shadow-[0_0_24px_rgba(6,182,212,0.4)] hover:opacity-95 active:scale-98 transition-all flex items-center justify-center gap-2 disabled:opacity-50"
+                >
+                  {isApplyingTargets ? (
+                    <>
+                      <Loader2 size={18} className="animate-spin" />
+                      <span>Applying Targets &amp; Initializing Next Session...</span>
+                    </>
+                  ) : (
+                    <>
+                      <Award size={18} />
+                      <span>Apply AI Targets &amp; Complete Session</span>
+                    </>
+                  )}
                 </button>
               ) : (
                 <div className="py-3 px-4 bg-emerald-500/15 border border-emerald-500/30 rounded-2xl flex items-center justify-center gap-2 text-emerald-400 font-bold text-xs">
-                  <Check size={16} /><span>Targets Saved to PostgreSQL as Ghost Benchmarks!</span>
+                  <Check size={16} /><span>Session Archived &amp; Next Session Initialized!</span>
                 </div>
               )}
             </div>
           </div>
         </div>
       )}
+
+      {/* Floating Rest Timer Overlay */}
+      {restTimer > 0 && (
+        <div className="fixed bottom-6 right-6 z-50 bg-[#0a1120]/95 border border-cyan-500/40 backdrop-blur-xl px-4 py-3 rounded-2xl shadow-[0_0_25px_rgba(6,182,212,0.3)] flex items-center gap-3 animate-in slide-in-from-bottom-5 duration-200">
+          <div className="w-8 h-8 rounded-xl bg-cyan-500/20 text-cyan-400 flex items-center justify-center border border-cyan-500/30">
+            <Timer size={16} className="animate-spin" />
+          </div>
+          <div>
+            <div className="flex items-center gap-2">
+              <span className="text-xs font-bold text-white">Rest Timer</span>
+              <span className="text-[10px] text-slate-400 truncate max-w-[100px]">{activeRestExercise}</span>
+            </div>
+            <p className="text-base font-black text-cyan-400 font-mono leading-none mt-0.5">
+              {formatTimer(restTimer)}
+            </p>
+          </div>
+          <div className="flex items-center gap-1 ml-2">
+            <button
+              onClick={() => setRestTimer((prev) => prev + 30)}
+              className="px-2 py-1 rounded-lg bg-slate-800 hover:bg-slate-700 text-[10px] font-bold text-cyan-300 transition-colors"
+            >
+              +30s
+            </button>
+            <button
+              onClick={() => setRestTimer(0)}
+              className="p-1.5 rounded-lg bg-slate-800 hover:bg-red-500/20 text-slate-400 hover:text-red-400 transition-colors"
+              title="Skip Rest"
+            >
+              <X size={14} />
+            </button>
+          </div>
+        </div>
+      )}
+      </main>
     </div>
   );
 }
+

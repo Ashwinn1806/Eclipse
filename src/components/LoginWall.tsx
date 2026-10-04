@@ -2,6 +2,7 @@
 
 import { signIn } from 'next-auth/react';
 import { Sparkles, Shield, TrendingUp, Zap } from 'lucide-react';
+import Logo from '@/components/Logo';
 
 const features = [
   { icon: TrendingUp, label: 'AI Progression Engine', desc: 'Gemini prescribes your next session weight and reps.' },
@@ -27,14 +28,11 @@ export default function LoginWall() {
       <div className="w-full max-w-sm space-y-8">
         {/* Hero */}
         <div className="text-center space-y-3">
-          <div className="inline-flex items-center justify-center w-16 h-16 rounded-2xl bg-gradient-to-br from-cyan-500/20 to-teal-500/20 border border-cyan-500/30 mb-2 mx-auto shadow-[0_0_40px_rgba(6,182,212,0.15)]">
-            <Sparkles size={28} className="text-cyan-400" />
+          <div className="flex justify-center mb-2">
+            <Logo size="lg" />
           </div>
-          <h1 className="text-4xl font-black tracking-tight bg-gradient-to-r from-cyan-400 via-teal-300 to-emerald-400 bg-clip-text text-transparent">
-            ECLIPSE
-          </h1>
           <p className="text-slate-400 text-sm leading-relaxed">
-            Data-Driven Progression.<br />
+            Data-Driven Progressive Overload.<br />
             <span className="text-slate-500">Your AI-powered gym &amp; nutrition engine.</span>
           </p>
         </div>

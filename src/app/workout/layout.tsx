@@ -1,8 +1,8 @@
 'use client';
 
-import React from 'react';
+import React, { useTransition } from 'react';
 import Link from 'next/link';
-import { usePathname } from 'next/navigation';
+import { usePathname, useRouter } from 'next/navigation';
 import { 
   Dumbbell, 
   Flame, 
@@ -10,11 +10,18 @@ import {
   Activity, 
   Shield, 
   ChevronRight, 
+  ChevronUp,
+  ChevronDown,
   Sparkles, 
   Home, 
-  Utensils 
+  Utensils,
+  Trash2,
+  Plus,
+  Loader2,
 } from 'lucide-react';
+import { toast } from 'sonner';
 import { USER_SPLITS } from '@/lib/splits';
+import { deleteAndReindexSplit, reorderSplit, createNewSplit } from '@/app/actions';
 
 const ICONS_MAP = {
   dumbbell: Dumbbell,
@@ -30,6 +37,43 @@ export default function WorkoutLayout({
   children: React.ReactNode;
 }) {
   const pathname = usePathname();
+  const router = useRouter();
+  const [isDeleting, startDeleteTransition] = useTransition();
+
+  const handleDeleteSplit = (splitId: string) => {
+    if (!confirm('Are you sure you want to delete this split? Remaining splits will re-index sequentially.')) return;
+    startDeleteTransition(async () => {
+      const res = await deleteAndReindexSplit(splitId);
+      router.refresh();
+      if (res?.success) {
+        toast.success('Split deleted and re-indexed sequentially');
+      } else {
+        toast.error('Failed to delete split');
+      }
+    });
+  };
+
+  const handleReorderSplit = (splitId: string, direction: 'up' | 'down') => {
+    startDeleteTransition(async () => {
+      const res = await reorderSplit(splitId, direction);
+      router.refresh();
+      if (res?.success) {
+        toast.success(`Split shifted ${direction}`);
+      }
+    });
+  };
+
+  const handleCreateNewSplit = () => {
+    startDeleteTransition(async () => {
+      const res = await createNewSplit();
+      router.refresh();
+      if (res?.success) {
+        toast.success(`Created ${res.newSplit?.name || 'New Session'}!`);
+      } else {
+        toast.error('Failed to create new split');
+      }
+    });
+  };
 
   return (
     <div className="min-h-screen bg-[#020617] text-slate-100 flex flex-col md:flex-row antialiased selection:bg-cyan-500/20 selection:text-cyan-300">
@@ -77,7 +121,7 @@ export default function WorkoutLayout({
               </span>
             </div>
 
-            <nav className="space-y-1.5">
+            <nav className="space-y-1.5 overflow-y-auto max-h-[calc(100vh-320px)] custom-scrollbar pr-1">
               {USER_SPLITS.map((split) => {
                 const IconComponent = ICONS_MAP[split.iconName] || Dumbbell;
                 const isActive = pathname === `/workout/${split.slug}`;
@@ -117,18 +161,68 @@ export default function WorkoutLayout({
                       </div>
                     </div>
 
-                    <ChevronRight
-                      size={16}
-                      className={`transition-all ${
-                        isActive
-                          ? 'text-cyan-400 translate-x-0.5'
-                          : 'text-slate-600 group-hover:text-slate-400 group-hover:translate-x-0.5'
-                      }`}
-                    />
+                    <div className="flex items-center gap-1">
+                      <div className="opacity-0 group-hover:opacity-100 flex items-center gap-0.5">
+                        <button
+                          type="button"
+                          onClick={(e) => {
+                            e.preventDefault();
+                            e.stopPropagation();
+                            handleReorderSplit(split.slug, 'up');
+                          }}
+                          className="p-1 rounded-md text-slate-400 hover:text-cyan-300 hover:bg-cyan-500/10 transition-all"
+                          title="Shift Up"
+                        >
+                          <ChevronUp size={13} />
+                        </button>
+                        <button
+                          type="button"
+                          onClick={(e) => {
+                            e.preventDefault();
+                            e.stopPropagation();
+                            handleReorderSplit(split.slug, 'down');
+                          }}
+                          className="p-1 rounded-md text-slate-400 hover:text-cyan-300 hover:bg-cyan-500/10 transition-all"
+                          title="Shift Down"
+                        >
+                          <ChevronDown size={13} />
+                        </button>
+                        <button
+                          type="button"
+                          onClick={(e) => {
+                            e.preventDefault();
+                            e.stopPropagation();
+                            handleDeleteSplit(split.slug);
+                          }}
+                          className="p-1 rounded-md text-slate-400 hover:text-red-400 hover:bg-red-500/10 transition-all"
+                          title="Delete & Re-index Split"
+                          aria-label={`Delete ${split.name}`}
+                        >
+                          <Trash2 size={13} />
+                        </button>
+                      </div>
+                      <ChevronRight
+                        size={16}
+                        className={`transition-all ${
+                          isActive
+                            ? 'text-cyan-400 translate-x-0.5'
+                            : 'text-slate-600 group-hover:text-slate-400 group-hover:translate-x-0.5'
+                        }`}
+                      />
+                    </div>
                   </Link>
                 );
               })}
             </nav>
+            <button
+              type="button"
+              onClick={handleCreateNewSplit}
+              disabled={isDeleting}
+              className="w-full mt-3 py-2.5 px-3 shrink-0 rounded-xl bg-slate-900/80 hover:bg-slate-800/90 border border-dashed border-cyan-500/30 hover:border-cyan-500/60 text-cyan-400 hover:text-cyan-300 text-xs font-bold flex items-center justify-center gap-2 transition-all shadow-[0_0_15px_rgba(6,182,212,0.1)] active:scale-98 disabled:opacity-50"
+            >
+              {isDeleting ? <Loader2 size={14} className="animate-spin" /> : <Plus size={14} />}
+              <span>+ Add Session</span>
+            </button>
           </div>
         </div>
 
