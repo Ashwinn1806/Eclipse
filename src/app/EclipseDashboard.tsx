@@ -1,7 +1,7 @@
 'use client';
 import { useState, useEffect, useTransition, useOptimistic, useRef } from 'react';
 import AppHeader from '@/components/AppHeader';
-import { useRouter } from 'next/navigation';
+import { useRouter, usePathname } from 'next/navigation';
 import Link from 'next/link';
 import { signOut } from 'next-auth/react';
 import {
@@ -225,6 +225,7 @@ export default function EclipseDashboard({
   initialWeightLogs = [],
 }: EclipseDashboardProps) {
   const router = useRouter();
+  const pathname = usePathname();
   const [activeTab, setActiveTab] = useState<'dashboard' | 'workout' | 'nutrition' | 'ai'>(initialTab);
 
   // File import state
@@ -534,6 +535,11 @@ export default function EclipseDashboard({
       router.refresh();
       if (res?.success) {
         toast.success('Split deleted and re-indexed sequentially!');
+        if (pathname?.includes(splitId)) {
+          const remaining = res.splits || USER_SPLITS;
+          const firstAvailableSlug = remaining[0]?.slug || 'push';
+          router.push(`/workout/${firstAvailableSlug}`);
+        }
       } else {
         toast.error('Failed to delete split');
       }

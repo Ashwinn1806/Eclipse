@@ -621,45 +621,58 @@ export async function deleteAndReindexSplit(splitId: string) {
   const userId = await getSessionUserId();
   try {
     const { deleteAndReindexMemorySplit } = await import('@/lib/splits');
+    const normalizedSplitId = splitId.toLowerCase().trim();
 
-    // 1. Permanently delete specified workout split & sets from database
-    const targetSessions = await prisma.workoutSession.findMany({
-      where: {
-        userId,
-        OR: [
-          { id: splitId },
-          { splitDayName: { contains: splitId, mode: 'insensitive' } },
-        ],
-      },
-    });
-
-    for (const s of targetSessions) {
-      await prisma.workoutSet.deleteMany({ where: { sessionId: s.id } });
-      await prisma.workoutSession.delete({ where: { id: s.id } });
-    }
-
-    // 2. Fetch all remaining splits for user ordered by creation date
-    const remainingSessions = await prisma.workoutSession.findMany({
-      where: { userId },
-      orderBy: { createdAt: 'asc' },
-    });
-
-    // 3. Loop through remaining splits and update day numbers / titles sequentially starting from 1
-    for (let i = 0; i < remainingSessions.length; i++) {
-      const sess = remainingSessions[i];
-      const newDayNum = i + 1;
-      const cleanedName = sess.splitDayName.replace(/^Day\s+\d+:\s*/i, '');
-      const updatedName = `Day ${newDayNum}: ${cleanedName}`;
-      await prisma.workoutSession.update({
-        where: { id: sess.id },
-        data: { splitDayName: updatedName },
+    await prisma.$transaction(async (tx) => {
+      // 1. Identify target sessions by ID or splitDayName match
+      const targetSessions = await tx.workoutSession.findMany({
+        where: {
+          userId,
+          OR: [
+            { id: splitId },
+            { splitDayName: { contains: splitId, mode: 'insensitive' } },
+          ],
+        },
+        select: { id: true },
       });
-    }
 
-    // Also update in-memory split definition list
-    const updatedMemorySplits = deleteAndReindexMemorySplit(splitId);
+      const targetIds = targetSessions.map((s) => s.id);
 
-    // 4. Layout-level cache invalidation
+      if (targetIds.length > 0) {
+        // Cascade-delete associated workout sets
+        await tx.workoutSet.deleteMany({
+          where: { sessionId: { in: targetIds } },
+        });
+
+        // Delete the session records
+        await tx.workoutSession.deleteMany({
+          where: { id: { in: targetIds } },
+        });
+      }
+
+      // 2. Fetch all remaining splits for user ordered by creation date
+      const remainingSessions = await tx.workoutSession.findMany({
+        where: { userId },
+        orderBy: { createdAt: 'asc' },
+      });
+
+      // 3. Update day numbers and titles sequentially starting from 1
+      for (let i = 0; i < remainingSessions.length; i++) {
+        const sess = remainingSessions[i];
+        const newDayNum = i + 1;
+        const cleanedName = sess.splitDayName.replace(/^Day\s+\d+:\s*/i, '');
+        const updatedName = `Day ${newDayNum}: ${cleanedName}`;
+        await tx.workoutSession.update({
+          where: { id: sess.id },
+          data: { splitDayName: updatedName },
+        });
+      }
+    });
+
+    // 4. Update in-memory split definition list
+    const updatedMemorySplits = deleteAndReindexMemorySplit(normalizedSplitId);
+
+    // 5. Layout-level cache invalidation
     revalidatePath('/', 'layout');
     revalidatePath('/workout/[split]', 'layout');
 
@@ -794,7 +807,7 @@ export async function createNewSplit() {
       orderBy: { createdAt: 'asc' },
     });
 
-    let maxDayNum = USER_SPLITS.length;
+    let maxDayNum = userSessions.length;
     for (const sess of userSessions) {
       const match = sess.splitDayName.match(/^Day\s+(\d+):/i);
       if (match) {
@@ -815,29 +828,39 @@ export async function createNewSplit() {
     newSplit.name = `Day ${nextDayNum}: New Session`;
     newSplit.shortName = `Day ${nextDayNum}`;
 
-    await prisma.workoutSession.create({
+    const session = await prisma.workoutSession.create({
       data: {
         userId,
         splitDayName: newSplit.name,
         totalTonnage: 0,
         isCompleted: false,
         sets: {
-          create: newSplit.exercises[0].presetSets?.map((ps) => ({
-            exerciseName: newSplit.exercises[0].name,
+          create: newSplit.exercises[0]?.presetSets?.map((ps) => ({
+            exerciseName: newSplit.exercises[0]?.name || 'Bench Press',
             setNumber: ps.setNumber,
             targetWeight: ps.targetWeight,
             targetReps: ps.targetReps,
             actualWeight: null,
             actualReps: null,
             isCompleted: false,
-          })),
+          })) || [
+            {
+              exerciseName: 'Bench Press',
+              setNumber: 1,
+              targetWeight: 20,
+              targetReps: 10,
+              actualWeight: null,
+              actualReps: null,
+              isCompleted: false,
+            },
+          ],
         },
       },
     });
 
     revalidatePath('/', 'layout');
     revalidatePath('/workout/[split]', 'layout');
-    return { success: true, newSplit };
+    return { success: true, newSplit, session };
   } catch (err) {
     console.warn('createNewSplit failed:', err);
     return { success: false, error: String(err) };

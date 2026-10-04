@@ -47,6 +47,12 @@ export default function WorkoutLayout({
       router.refresh();
       if (res?.success) {
         toast.success('Split deleted and re-indexed sequentially');
+        const isCurrentActive = pathname === `/workout/${splitId}` || pathname.includes(splitId);
+        if (isCurrentActive) {
+          const remaining = res.splits || USER_SPLITS;
+          const firstAvailableSlug = remaining[0]?.slug || 'push';
+          router.push(`/workout/${firstAvailableSlug}`);
+        }
       } else {
         toast.error('Failed to delete split');
       }
@@ -69,6 +75,9 @@ export default function WorkoutLayout({
       router.refresh();
       if (res?.success) {
         toast.success(`Created ${res.newSplit?.name || 'New Session'}!`);
+        if (res.newSplit?.slug) {
+          router.push(`/workout/${res.newSplit.slug}`);
+        }
       } else {
         toast.error('Failed to create new split');
       }
